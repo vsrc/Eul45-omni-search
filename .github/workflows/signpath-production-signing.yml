@@ -8,7 +8,7 @@ jobs:
     name: Build and Sign x64 NSIS (Production)
     runs-on: windows-latest
     permissions:
-      contents: read
+      contents: write
       actions: read
 
     steps:
