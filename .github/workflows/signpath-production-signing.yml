@@ -1,4 +1,4 @@
-﻿name: SignPath Production Signing
+name: SignPath Production Signing
 
 on:
   workflow_dispatch:
@@ -60,7 +60,23 @@ jobs:
           wait-for-completion: true
           wait-for-completion-timeout-in-seconds: 3600
           output-artifact-directory: "${{ github.workspace }}\\signed-artifacts"
-          skip-decompress: true
+          skip-decompress: false
+
+      - name: Get version from tauri.conf.json
+        id: get-version
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload signed installer to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.get-version.outputs.version }}
+          files: signed-artifacts/*.exe
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload signed installer
         uses: actions/upload-artifact@v7
