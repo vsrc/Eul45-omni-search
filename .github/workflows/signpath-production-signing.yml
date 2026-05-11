@@ -60,7 +60,7 @@ jobs:
           wait-for-completion: true
           wait-for-completion-timeout-in-seconds: 3600
           output-artifact-directory: "${{ github.workspace }}\\signed-artifacts"
-          skip-decompress: false
+          skip-decompress: true
 
       - name: Get version from tauri.conf.json
         id: get-version
