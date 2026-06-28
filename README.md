@@ -127,6 +127,7 @@ OmniSearch reads NTFS metadata directly through USN/MFT APIs for quick global se
 - Full workspace / Quick Window switching from the tray menu, hotkey, and in-app controls.
 - Light/dark theme toggle and dedicated Search / Duplicates / Settings / Themes / About tabs.
 - Search syntax reference tab plus the standalone [Content Search Guide](CONTENT_SEARCH_GUIDE.md) for examples and operator details.
+- Android companion app source in `android/` for local Wi-Fi search, previews, pinning, and approved file actions from your phone.
 - Installer targets via Tauri bundle (MSI and NSIS).
 - Windows manifest requests Administrator privileges (`requireAdministrator`) for raw volume access.
 
@@ -136,6 +137,7 @@ OmniSearch reads NTFS metadata directly through USN/MFT APIs for quick global se
 - Desktop shell: Tauri v2
 - Bridge: Rust (`tauri`, `serde`, `cc`)
 - Native engine: C++ (Win32 API, NTFS USN/MFT)
+- Android companion: Kotlin, Jetpack Compose, Room, OkHttp
 - Installer: WiX/MSI and NSIS via Tauri bundle
 
 ## Repository Structure
@@ -173,6 +175,30 @@ omni-search/
 3. C++ scanner reads NTFS metadata via USN/MFT (`DeviceIoControl`) and builds in-memory index state.
 4. Live USN watcher applies file changes after initial indexing to keep search current.
 5. Search and duplicate results are serialized to JSON and returned to the UI.
+6. Optional Android sync runs as a local-network companion client after desktop approval.
+
+## OmniSearch Android Companion
+
+OmniSearch now includes a native Android companion application (`android/`) designed to control and sync with your desktop over your local Wi-Fi network.
+
+<p align="center">
+  <img src="docs/images/android_screenshot.png" alt="Android screenshot" width="180" />
+  <img src="docs/images/PC_screenshot.png" alt="PC screenshot" width="420" />
+  <img src="docs/images/android_screenshot2.png" alt="Android screenshot 2" width="180" />
+</p>
+
+### Connection & Sync Features
+- **Local Discovery & Pairing**: Pairing is initiated by scanning a QR code displayed in the desktop app's Sync tab, transferring the local IP address, port, and session token.
+- **Connection Security**: All connections operate purely on the local network (LAN) and require explicit manual authorization on the desktop application before any file data is exposed.
+- **Synchronized Capabilities**:
+  - Perform remote file searches on the PC's indexing engine directly from your phone.
+  - Browse search categories, open PC directories, and pin items to your mobile hub.
+  - Bidirectional file transfers: download discovered files from your PC to your phone, or upload media directly from your phone to your PC.
+  - Built-in edge-to-edge media viewer for local Android files.
+
+> **Secure Android Sync:** Android sync uses local-network `wss://` connections, desktop approval, and QR-code certificate pinning. See `android/README.md` for the full security model.
+
+---
 
 ## Main Commands (Tauri)
 
@@ -188,6 +214,7 @@ omni-search/
 - `open_external_url`
 - `load_preview_data_url`
 - `list_installed_apps`, `launch_installed_app`, `reveal_installed_app`
+- `start_sync_server_command`, `stop_sync_server_command`, `get_sync_server_status_command`
 
 ## Requirements
 
@@ -196,6 +223,7 @@ omni-search/
 - Rust stable toolchain (`x86_64-pc-windows-msvc`)
 - Visual Studio 2022 C++ Build Tools (`Desktop development with C++`)
 - WebView2 Runtime (normally preinstalled on Windows 11)
+- Android Studio + JDK 17 if you want to build the Android companion app.
 
 ## Quick Start (Development)
 
@@ -212,6 +240,13 @@ Important:
 
 - The app needs Administrator privileges to read `\\.\C:` for USN/MFT data.
 - If indexing fails with "Unable to open volume", run the app elevated or use the packaged build with UAC prompt.
+
+Android companion:
+
+```powershell
+cd android
+.\gradlew.bat assembleDebug
+```
 
 ## Build Installers (Distribution)
 

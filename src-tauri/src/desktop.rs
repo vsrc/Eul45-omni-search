@@ -626,6 +626,24 @@ fn apply_main_window_layout<R: Runtime>(
     apply_default_main_window_layout(window, mode)
 }
 
+fn apply_main_window_layout_with_fallback<R: Runtime>(
+    app: &AppHandle<R>,
+    window: &WebviewWindow<R>,
+    mode: WindowMode,
+) -> Result<(), String> {
+    match apply_main_window_layout(app, window, mode) {
+        Ok(()) => Ok(()),
+        Err(err) if matches!(mode, WindowMode::Full) => {
+            log_desktop_error(
+                "restore the full workspace layout",
+                &format!("{err}. Falling back to the default centered layout."),
+            );
+            apply_default_main_window_layout(window, mode)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 fn show_window_in_mode<R: Runtime>(app: &AppHandle<R>, mode: WindowMode) -> Result<(), String> {
     let window = main_window(app)?;
     let is_visible = window.is_visible().map_err(|err| err.to_string())?;
@@ -654,7 +672,7 @@ fn show_window_in_mode<R: Runtime>(app: &AppHandle<R>, mode: WindowMode) -> Resu
     }
 
     emit_window_mode(app, mode)?;
-    apply_main_window_layout(app, &window, mode)?;
+    apply_main_window_layout_with_fallback(app, &window, mode)?;
 
     window
         .set_always_on_top(false)
@@ -662,26 +680,21 @@ fn show_window_in_mode<R: Runtime>(app: &AppHandle<R>, mode: WindowMode) -> Resu
     window.show().map_err(|err| err.to_string())?;
 
     if was_minimized {
-        apply_main_window_layout(app, &window, mode)?;
+        apply_main_window_layout_with_fallback(app, &window, mode)?;
     }
 
     sync_window_state_save_behavior(app);
-    window.set_focus().map_err(|err| err.to_string())
+    if let Err(err) = window.set_focus() {
+        log_desktop_error(
+            "focus the restored main window",
+            &format!("{err}. The window was shown but Windows did not grant focus."),
+        );
+    }
+    Ok(())
 }
 
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let window = main_window(app)?;
-    apply_main_window_layout(app, &window, current_window_mode(app))?;
-
-    if window.is_minimized().map_err(|err| err.to_string())? {
-        window.unminimize().map_err(|err| err.to_string())?;
-    }
-
-    window
-        .set_always_on_top(false)
-        .map_err(|err| err.to_string())?;
-    window.show().map_err(|err| err.to_string())?;
-    window.set_focus().map_err(|err| err.to_string())
+    show_window_in_mode(app, current_window_mode(app))
 }
 
 fn hide_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {

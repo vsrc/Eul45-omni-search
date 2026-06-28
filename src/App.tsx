@@ -7,6 +7,7 @@ import type {
 } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import { flushSync } from "react-dom";
 import "./App.css";
 import {
@@ -42,6 +43,10 @@ const QUICK_RESULTS_PANE_MIN_WIDTH = 320;
 const QUICK_PREVIEW_PANE_MIN_WIDTH = 360;
 const QUICK_RESULTS_PANE_DEFAULT_RATIO = 0.42;
 const QUICK_LOOK_COPY_FEEDBACK_MS = 1400;
+const TEXT_PREVIEW_MAX_CHARS = 3200;
+const CONTENT_SNIPPET_MAX_CHARS = 220;
+const CONTENT_SNIPPET_RESULT_LIMIT = 24;
+const TEXT_PREVIEW_COMMAND_TIMEOUT_MS = 2800;
 
 type IndexStatus = {
   indexing: boolean;
@@ -49,6 +54,8 @@ type IndexStatus = {
   indexedCount: number;
   lastError?: string | null;
 };
+
+type ContentSearchMode = "auto" | "ansi" | "utf8" | "utf16" | "utf16be";
 
 type SearchResult = {
   resultKind: "file" | "app";
@@ -66,6 +73,12 @@ type SearchResult = {
   iconDataUrl?: string | null;
   locationText?: string;
   locationLabel?: string;
+};
+
+type TextPreviewPayload = {
+  text: string;
+  truncated: boolean;
+  matched: boolean;
 };
 
 type InstalledApp = {
@@ -183,11 +196,44 @@ type RecentActivityItemEntry = SearchResult & {
 };
 type RecentActivityEntry = RecentActivityQueryEntry | RecentActivityItemEntry;
 
-type ActiveTab = "search" | "duplicates" | "advanced" | "themes" | "syntax" | "about";
+type PendingPairingApproval = {
+  deviceId: string;
+  deviceName: string;
+  peerAddress: string;
+};
+
+type MobileTransferSnapshot = {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  bytesSent: number;
+  status: "queued" | "sending" | "completed" | "failed";
+  error?: string | null;
+};
+
+type DesktopSendToPhoneResult = {
+  queued: number;
+  failed: number;
+  messages: string[];
+};
+
+type SyncServerInfo = {
+  running: boolean;
+  address: string;
+  port: number;
+  qrSvg: string;
+  connectedClients: number;
+  pairingUri: string;
+  pendingApprovals: PendingPairingApproval[];
+  fileTransfers: MobileTransferSnapshot[];
+};
+
+type ActiveTab = "search" | "duplicates" | "advanced" | "themes" | "syntax" | "about" | "sync";
 type ResultViewTab = "all" | "apps" | "media" | "docs" | "archives";
 type ResultSortMode = "relevance" | "newest" | "largest" | "name";
 type ThemeMode = "dark" | "light";
-type PreviewKind = "image" | "video" | "pdf" | "none";
+type PreviewKind = "image" | "video" | "pdf" | "text" | "none";
 const THEME_PRESET_IDS = [
   "slate-glass",
   "slate",
@@ -491,7 +537,7 @@ const THEME_PRESETS: ThemePreset[] = [
       "--highlight-text": "#ffffff",
       "--result-hover": "rgba(255, 255, 255, 0.04)",
     },
-      light: {
+    light: {
       "--bg-deep": "#f3f3f3",
       "--bg-mid": "#eeeeee",
       "--panel": "rgba(255, 255, 255, 0.7)",
@@ -540,30 +586,30 @@ const THEME_PRESETS: ThemePreset[] = [
     id: "modern",
     label: "Modern Sleek",
     description: "Windows-style productivity neutrals with a clean blue accent.",
-   dark: {
-  "--bg-deep": "#1c1c1c",
-  "--bg-mid": "#262626",
-  "--panel": "rgba(32, 32, 32, 0.75)",
-  "--panel-border": "rgba(255, 255, 255, 0.08)",
-  "--text-main": "#ffffff",
-  "--text-muted": "rgba(255, 255, 255, 0.6)",
-  "--accent": "#60cdff",
-  "--danger": "#ff99a4",
-  "--body-glow-a": "rgba(96, 205, 255, 0.08)",
-  "--body-glow-b": "rgba(0, 0, 0, 0)",
-  "--panel-shadow": "0 8px 32px rgba(0, 0, 0, 0.4)",
-  "--surface-elevated": "rgba(45, 45, 45, 0.95)",
-  "--surface-strong": "rgba(50, 50, 50, 0.98)",
-  "--surface-input": "rgba(255, 255, 255, 0.06)",
-  "--surface-muted": "rgba(255, 255, 255, 0.04)",
-  "--surface-toolbar": "rgba(32, 32, 32, 0.6)",
-  "--border-soft": "rgba(255, 255, 255, 0.05)",
-  "--border-strong": "rgba(255, 255, 255, 0.12)",
-  "--text-soft-contrast": "rgba(255, 255, 255, 0.9)",
-  "--highlight-bg": "rgba(96, 205, 255, 0.15)",
-  "--highlight-text": "#ffffff",
-  "--result-hover": "rgba(255, 255, 255, 0.06)",
-},
+    dark: {
+      "--bg-deep": "#1c1c1c",
+      "--bg-mid": "#262626",
+      "--panel": "rgba(32, 32, 32, 0.75)",
+      "--panel-border": "rgba(255, 255, 255, 0.08)",
+      "--text-main": "#ffffff",
+      "--text-muted": "rgba(255, 255, 255, 0.6)",
+      "--accent": "#60cdff",
+      "--danger": "#ff99a4",
+      "--body-glow-a": "rgba(96, 205, 255, 0.08)",
+      "--body-glow-b": "rgba(0, 0, 0, 0)",
+      "--panel-shadow": "0 8px 32px rgba(0, 0, 0, 0.4)",
+      "--surface-elevated": "rgba(45, 45, 45, 0.95)",
+      "--surface-strong": "rgba(50, 50, 50, 0.98)",
+      "--surface-input": "rgba(255, 255, 255, 0.06)",
+      "--surface-muted": "rgba(255, 255, 255, 0.04)",
+      "--surface-toolbar": "rgba(32, 32, 32, 0.6)",
+      "--border-soft": "rgba(255, 255, 255, 0.05)",
+      "--border-strong": "rgba(255, 255, 255, 0.12)",
+      "--text-soft-contrast": "rgba(255, 255, 255, 0.9)",
+      "--highlight-bg": "rgba(96, 205, 255, 0.15)",
+      "--highlight-text": "#ffffff",
+      "--result-hover": "rgba(255, 255, 255, 0.06)",
+    },
 
     light: {
       "--bg-deep": "#f3f3f3",
@@ -923,6 +969,8 @@ const RESULT_VIEW_TABS: Array<{ id: ResultViewTab; label: string }> = [
 type SearchSyntaxPreview = {
   pathQuery: string;
   hasContentSearch: boolean;
+  contentQuery: string;
+  contentMode: ContentSearchMode | null;
 };
 
 const SEARCH_SYNTAX_PATTERN =
@@ -1135,6 +1183,39 @@ const IMAGE_PREVIEW_EXTENSIONS = new Set([
   "ico",
 ]);
 const VIDEO_PREVIEW_EXTENSIONS = new Set(["mp4", "mkv", "avi", "mov", "wmv", "webm", "m4v"]);
+const TEXT_PREVIEW_EXTENSIONS = new Set([
+  "txt",
+  "md",
+  "log",
+  "ini",
+  "cfg",
+  "conf",
+  "csv",
+  "json",
+  "xml",
+  "yaml",
+  "yml",
+  "toml",
+  "html",
+  "htm",
+  "css",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "rs",
+  "py",
+  "java",
+  "c",
+  "cpp",
+  "h",
+  "hpp",
+  "cs",
+  "sql",
+  "bat",
+  "cmd",
+  "ps1",
+]);
 
 const SOCIAL_LINKS: SocialLink[] = [
   { label: "GitHub", url: "https://github.com/Eul45", icon: "github" },
@@ -1397,6 +1478,15 @@ function ConsoleIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <rect x="3.75" y="5" width="16.5" height="14" rx="2.4" />
       <path d="m7.5 10 2.5 2-2.5 2M11.75 16h4.75" />
+    </svg>
+  );
+}
+
+function PhoneIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="7.25" y="3" width="9.5" height="18" rx="2.4" />
+      <path d="M10.5 17.75h3" />
     </svg>
   );
 }
@@ -1785,7 +1875,251 @@ function previewKindFromResult(result: SearchResult): PreviewKind {
   if (ext === "pdf") {
     return "pdf";
   }
+  if (TEXT_PREVIEW_EXTENSIONS.has(ext)) {
+    return "text";
+  }
   return "none";
+}
+
+function isAssetPreviewKind(kind: PreviewKind): kind is "image" | "video" | "pdf" {
+  return kind === "image" || kind === "video" || kind === "pdf";
+}
+
+function textPreviewCacheKey(
+  result: SearchResult,
+  contentQuery: string,
+  contentMode: ContentSearchMode | null,
+  maxChars: number,
+): string {
+  return [
+    rowKeyForResult(result),
+    maxChars,
+    (contentMode ?? "auto").toLowerCase(),
+    contentQuery.trim().toLowerCase(),
+  ].join(":");
+}
+
+function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      reject(new Error(`${label} timed out.`));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((error) => {
+        window.clearTimeout(timeout);
+        reject(error);
+      });
+  });
+}
+
+function likelyUtf16Encoding(bytes: Uint8Array): "utf-16le" | "utf-16be" | null {
+  if (bytes.length < 4) {
+    return null;
+  }
+
+  const unitCount = Math.floor(bytes.length / 2);
+  if (unitCount < 2) {
+    return null;
+  }
+
+  let evenNulls = 0;
+  let oddNulls = 0;
+  for (let index = 0; index < unitCount * 2; index += 2) {
+    if (bytes[index] === 0) {
+      evenNulls += 1;
+    }
+    if (bytes[index + 1] === 0) {
+      oddNulls += 1;
+    }
+  }
+
+  if (oddNulls * 3 >= unitCount && evenNulls * 16 <= unitCount) {
+    return "utf-16le";
+  }
+  if (evenNulls * 3 >= unitCount && oddNulls * 16 <= unitCount) {
+    return "utf-16be";
+  }
+  return null;
+}
+
+function decodeTextPreviewBytes(bytes: Uint8Array, contentMode: ContentSearchMode | null): string {
+  const mode = contentMode?.toLowerCase() ?? "auto";
+
+  const decodeWith = (encoding: string, sourceBytes: Uint8Array) => {
+    try {
+      return new TextDecoder(encoding, { fatal: false }).decode(sourceBytes);
+    } catch {
+      return new TextDecoder("utf-8", { fatal: false }).decode(sourceBytes);
+    }
+  };
+
+  if (mode === "utf8") {
+    const trimmed = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? bytes.slice(3) : bytes;
+    return decodeWith("utf-8", trimmed);
+  }
+  if (mode === "utf16") {
+    const trimmed = bytes[0] === 0xff && bytes[1] === 0xfe ? bytes.slice(2) : bytes;
+    return decodeWith("utf-16le", trimmed);
+  }
+  if (mode === "utf16be") {
+    const trimmed = bytes[0] === 0xfe && bytes[1] === 0xff ? bytes.slice(2) : bytes;
+    return decodeWith("utf-16be", trimmed);
+  }
+
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return decodeWith("utf-8", bytes.slice(3));
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return decodeWith("utf-16le", bytes.slice(2));
+  }
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return decodeWith("utf-16be", bytes.slice(2));
+  }
+
+  const detectedUtf16 = likelyUtf16Encoding(bytes);
+  if (detectedUtf16) {
+    return decodeWith(detectedUtf16, bytes);
+  }
+
+  return decodeWith("utf-8", bytes);
+}
+
+function normalizePreviewText(text: string): string {
+  return text.replace(/^\uFEFF/, "").replace(/\0/g, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function takeTextPreviewSnippet(
+  text: string,
+  maxChars: number,
+  contentQuery: string,
+): TextPreviewPayload {
+  const normalizedText = normalizePreviewText(text);
+  const effectiveMaxChars = Math.min(Math.max(maxChars, 120), 12_000);
+  if (!normalizedText) {
+    return {
+      text: "",
+      truncated: false,
+      matched: false,
+    };
+  }
+
+  const trimmedQuery = contentQuery.trim();
+  if (trimmedQuery) {
+    const lowerText = normalizedText.toLowerCase();
+    const lowerQuery = trimmedQuery.toLowerCase();
+    const matchIndex = lowerText.indexOf(lowerQuery);
+
+    if (matchIndex >= 0) {
+      const focusMatchEarly = effectiveMaxChars <= CONTENT_SNIPPET_MAX_CHARS;
+      let start = matchIndex;
+      let end = Math.min(normalizedText.length, start + effectiveMaxChars);
+
+      if (!focusMatchEarly) {
+        const availableContext = Math.max(0, effectiveMaxChars - trimmedQuery.length);
+        const minimumLeadingContext = 24;
+        const contextBefore = Math.min(
+          availableContext,
+          Math.max(minimumLeadingContext, Math.floor(availableContext * 0.5)),
+        );
+        start = Math.max(0, matchIndex - contextBefore);
+        end = Math.min(normalizedText.length, start + effectiveMaxChars);
+        const preferredEnd = Math.min(
+          normalizedText.length,
+          matchIndex + trimmedQuery.length + (availableContext - contextBefore),
+        );
+        if (end < preferredEnd) {
+          end = preferredEnd;
+          start = Math.max(0, end - effectiveMaxChars);
+        }
+      }
+      const excerpt = `${start > 0 ? "…" : ""}${normalizedText.slice(start, end)}${end < normalizedText.length ? "…" : ""}`;
+      return {
+        text: excerpt,
+        truncated: start > 0 || end < normalizedText.length,
+        matched: true,
+      };
+    }
+  }
+
+  if (normalizedText.length <= effectiveMaxChars) {
+    return {
+      text: normalizedText,
+      truncated: false,
+      matched: false,
+    };
+  }
+
+  return {
+    text: `${normalizedText.slice(0, effectiveMaxChars)}…`,
+    truncated: true,
+    matched: false,
+  };
+}
+
+function loadTextPreviewViaTauri(
+  path: string,
+  maxChars: number,
+  contentQuery: string | null,
+  contentMode: ContentSearchMode | null,
+): Promise<TextPreviewPayload> {
+  return promiseWithTimeout(
+    invoke<TextPreviewPayload>("load_text_preview", {
+      path,
+      maxChars,
+      max_chars: maxChars,
+      contentQuery,
+      content_query: contentQuery,
+      contentMode: contentMode,
+      content_mode: contentMode,
+    }),
+    TEXT_PREVIEW_COMMAND_TIMEOUT_MS,
+    "Text preview",
+  );
+}
+
+async function loadTextPreviewFallback(
+  path: string,
+  maxChars: number,
+  contentQuery: string,
+  contentMode: ContentSearchMode | null,
+): Promise<TextPreviewPayload> {
+  const candidates = [previewSrcFromPath(path), fileUrlFromPath(path)].filter((value) => value.length > 0);
+  if (candidates.length === 0) {
+    throw new Error("No URL available for text preview fallback.");
+  }
+
+  let lastError: unknown = null;
+  for (const source of candidates) {
+    const controller = new AbortController();
+    const abortTimeout = window.setTimeout(() => {
+      controller.abort();
+    }, 2500);
+
+    try {
+      const response = await fetch(source, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`Text preview fallback failed with status ${response.status}.`);
+      }
+
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const decoded = decodeTextPreviewBytes(bytes, contentMode);
+      return takeTextPreviewSnippet(decoded, maxChars, contentQuery);
+    } catch (error) {
+      lastError = error;
+    } finally {
+      window.clearTimeout(abortTimeout);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Text preview fallback failed.");
 }
 
 function iconKindFromResult(result: SearchResult): ResultIconKind {
@@ -2021,7 +2355,11 @@ function relevanceScore(result: SearchResult, queryValue: string): number {
   return 0;
 }
 
-function highlightMatch(text: string, queryValue: string): ReactNode {
+function highlightMatch(
+  text: string,
+  queryValue: string,
+  variant: "default" | "content" = "default",
+): ReactNode {
   const query = queryValue.trim();
   if (!query) {
     return text;
@@ -2050,7 +2388,7 @@ function highlightMatch(text: string, queryValue: string): ReactNode {
     }
 
     nodes.push(
-      <mark className="match-highlight" key={`m-${key}`}>
+      <mark className={`match-highlight ${variant === "content" ? "content-match-highlight" : ""}`} key={`m-${key}`}>
         {text.slice(nextIndex, nextIndex + query.length)}
       </mark>,
     );
@@ -2157,11 +2495,18 @@ function formatShortcutLabel(value: string): string {
 
 function parseSearchSyntaxPreview(value: string): SearchSyntaxPreview {
   let hasContentSearch = false;
+  let contentQuery = "";
+  let contentMode: ContentSearchMode | null = null;
 
   const pathQuery = value
-    .replace(SEARCH_SYNTAX_PATTERN, (match, keyword: string) => {
+    .replace(SEARCH_SYNTAX_PATTERN, (match, keyword: string, quotedValue?: string, bareValue?: string) => {
       if (keyword.toLowerCase().includes("content")) {
         hasContentSearch = true;
+        contentQuery = (quotedValue ?? bareValue ?? "").trim();
+        contentMode =
+          keyword.toLowerCase() === "content"
+            ? "auto"
+            : (keyword.toLowerCase().replace("content", "") as ContentSearchMode);
       }
       return match.startsWith(" ") ? " " : "";
     })
@@ -2171,6 +2516,8 @@ function parseSearchSyntaxPreview(value: string): SearchSyntaxPreview {
   return {
     pathQuery,
     hasContentSearch,
+    contentQuery,
+    contentMode,
   };
 }
 
@@ -2281,6 +2628,10 @@ function App() {
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [searchSyntaxHelpSectionId, setSearchSyntaxHelpSectionId] = useState<string>("basics");
   const [activeTab, setActiveTab] = useState<ActiveTab>("search");
+  const [syncServerInfo, setSyncServerInfo] = useState<SyncServerInfo | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [pairingUriCopied, setPairingUriCopied] = useState(false);
   const [duplicateMinSizeMb, setDuplicateMinSizeMb] = useState("50");
   const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>([]);
   const [duplicatesLoading, setDuplicatesLoading] = useState(false);
@@ -2402,6 +2753,8 @@ function App() {
   const [previewSourceState, setPreviewSourceState] = useState<Record<string, number>>({});
   const [previewReadyState, setPreviewReadyState] = useState<Record<string, true>>({});
   const [previewDataUrls, setPreviewDataUrls] = useState<Record<string, string>>({});
+  const [textPreviewState, setTextPreviewState] = useState<Record<string, TextPreviewPayload>>({});
+  const [textPreviewLoadingState, setTextPreviewLoadingState] = useState<Record<string, true>>({});
   const [selectedPreviewSourceIndex, setSelectedPreviewSourceIndex] = useState<number>(0);
   const [selectedPreviewReadyState, setSelectedPreviewReadyState] = useState<Record<string, true>>({});
   const [quickLookOpen, setQuickLookOpen] = useState(false);
@@ -2438,8 +2791,8 @@ function App() {
   const parsedSearchLimitInput = Number(searchLimitInputTrimmed);
   const pendingSearchLimit =
     searchLimitInputTrimmed.length > 0 &&
-    Number.isFinite(parsedSearchLimitInput) &&
-    parsedSearchLimitInput > 0
+      Number.isFinite(parsedSearchLimitInput) &&
+      parsedSearchLimitInput > 0
       ? normalizeSearchLimit(parsedSearchLimitInput)
       : null;
   const searchLimitValueNeedsNormalization =
@@ -2473,6 +2826,8 @@ function App() {
   const trimmedQuery = query.trim();
   const displayQuery = searchSyntaxPreview.pathQuery.trim();
   const hasContentSearchSyntax = searchSyntaxPreview.hasContentSearch;
+  const contentSearchQuery = searchSyntaxPreview.contentQuery.trim();
+  const contentSearchMode = searchSyntaxPreview.contentMode;
   const requestedIndexConfigKey = includeAllDrives
     ? `ALL:${includeFolders ? "1" : "0"}`
     : selectedDrive
@@ -2650,6 +3005,20 @@ function App() {
     }
     return [selectedResult].slice(0, PREVIEW_DATA_URL_LIMIT);
   }, [quickLookOpen, selectedResult, showPreviews]);
+  const contentSnippetCandidates = useMemo(() => {
+    if (!hasContentSearchSyntax || !contentSearchQuery) {
+      return [];
+    }
+
+    return visibleResults
+      .filter(
+        (result) =>
+          !isAppSearchResult(result) &&
+          !result.isDirectory &&
+          previewKindFromResult(result) === "text",
+      )
+      .slice(0, CONTENT_SNIPPET_RESULT_LIMIT);
+  }, [contentSearchQuery, hasContentSearchSyntax, visibleResults]);
 
   const duplicateStats = useMemo(() => {
     let totalFiles = 0;
@@ -2696,6 +3065,125 @@ function App() {
       document.body.classList.remove("app-boot-ready");
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let timer: any;
+
+    const pollSyncServer = () => {
+      invoke<SyncServerInfo>("get_mobile_sync_server_info")
+        .then((info) => {
+          if (active) {
+            setSyncServerInfo(info);
+          }
+        })
+        .catch((error) => {
+          console.error("Failed to poll mobile sync server info:", error);
+        })
+        .finally(() => {
+          if (active) {
+            timer = window.setTimeout(pollSyncServer, 1000);
+          }
+        });
+    };
+
+    pollSyncServer();
+
+    return () => {
+      active = false;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<DesktopSendToPhoneResult>("desktop-send-to-phone-result", (event) => {
+      const { queued, failed, messages } = event.payload;
+      setActiveTab("sync");
+      void invoke<SyncServerInfo>("get_mobile_sync_server_info")
+        .then(setSyncServerInfo)
+        .catch((error) => {
+          console.error("Failed to refresh mobile sync server info:", error);
+        });
+
+      if (queued > 0) {
+        setActionError(null);
+        if (failed > 0) {
+          showActionNotice(`Queued ${queued} file${queued === 1 ? "" : "s"}; ${failed} skipped.`);
+        } else if (queued === 1 && messages[0]) {
+          showActionNotice(messages[0]);
+        } else {
+          showActionNotice(`Queued ${queued} files for phone.`);
+        }
+        return;
+      }
+
+      setActionError(messages[0] ?? "Connect a phone before sending files.");
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+      } else {
+        unlisten = dispose;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const startSyncServer = async () => {
+    setSyncBusy(true);
+    setSyncError(null);
+    try {
+      const info = await invoke<SyncServerInfo>("start_mobile_sync_server");
+      setSyncServerInfo(info);
+    } catch (err) {
+      setSyncError(String(err));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const stopSyncServer = async () => {
+    setSyncBusy(true);
+    setSyncError(null);
+    try {
+      const info = await invoke<SyncServerInfo>("stop_mobile_sync_server");
+      setSyncServerInfo(info);
+    } catch (err) {
+      setSyncError(String(err));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const approvePairing = async (deviceId: string) => {
+    setSyncError(null);
+    try {
+      await invoke("approve_mobile_pairing", { deviceId });
+      const info = await invoke<SyncServerInfo>("get_mobile_sync_server_info");
+      setSyncServerInfo(info);
+    } catch (err) {
+      setSyncError(String(err));
+    }
+  };
+
+  const rejectPairing = async (deviceId: string) => {
+    setSyncError(null);
+    try {
+      await invoke("reject_mobile_pairing", { deviceId });
+      const info = await invoke<SyncServerInfo>("get_mobile_sync_server_info");
+      setSyncServerInfo(info);
+    } catch (err) {
+      setSyncError(String(err));
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -3036,6 +3524,8 @@ function App() {
     setPreviewSourceState({});
     setPreviewReadyState({});
     setPreviewDataUrls({});
+    setTextPreviewState({});
+    setTextPreviewLoadingState({});
   }, [results, showPreviews]);
 
   useEffect(() => {
@@ -3068,7 +3558,9 @@ function App() {
       return;
     }
 
-    const candidates = previewLoadCandidates.filter((result) => previewKindFromResult(result) !== "none");
+    const candidates = previewLoadCandidates.filter((result) =>
+      isAssetPreviewKind(previewKindFromResult(result)),
+    );
     if (candidates.length === 0) {
       return;
     }
@@ -3111,6 +3603,162 @@ function App() {
       cancelled = true;
     };
   }, [showPreviews, previewDataUrls, previewLoadCandidates]);
+
+  useEffect(() => {
+    if ((!showPreviews && !quickLookOpen) || !selectedResult) {
+      return;
+    }
+    if (previewKindFromResult(selectedResult) !== "text") {
+      return;
+    }
+
+    const cacheKey = textPreviewCacheKey(
+      selectedResult,
+      contentSearchQuery,
+      contentSearchMode,
+      TEXT_PREVIEW_MAX_CHARS,
+    );
+
+    if (textPreviewState[cacheKey] || textPreviewLoadingState[cacheKey]) {
+      return;
+    }
+
+    let cancelled = false;
+    setTextPreviewLoadingState((previous) => ({ ...previous, [cacheKey]: true }));
+
+    void loadTextPreviewViaTauri(
+      selectedResult.path,
+      TEXT_PREVIEW_MAX_CHARS,
+      contentSearchQuery || null,
+      contentSearchMode,
+    )
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setTextPreviewState((previous) => ({ ...previous, [cacheKey]: payload }));
+      })
+      .catch(async () => {
+        try {
+          const payload = await loadTextPreviewFallback(
+            selectedResult.path,
+            TEXT_PREVIEW_MAX_CHARS,
+            contentSearchQuery,
+            contentSearchMode,
+          );
+          if (!cancelled) {
+            setTextPreviewState((previous) => ({ ...previous, [cacheKey]: payload }));
+          }
+        } catch {
+          if (!cancelled) {
+            setTextPreviewState((previous) => ({
+              ...previous,
+              [cacheKey]: { text: "", truncated: false, matched: false },
+            }));
+          }
+        }
+      })
+      .finally(() => {
+        setTextPreviewLoadingState((previous) => {
+          if (!previous[cacheKey]) {
+            return previous;
+          }
+          const next = { ...previous };
+          delete next[cacheKey];
+          return next;
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    contentSearchMode,
+    contentSearchQuery,
+    quickLookOpen,
+    selectedResult,
+    showPreviews,
+  ]);
+
+  useEffect(() => {
+    if (!hasContentSearchSyntax || !contentSearchQuery || contentSnippetCandidates.length === 0) {
+      return;
+    }
+
+    const pendingCandidates = contentSnippetCandidates.filter((result) => {
+      const cacheKey = textPreviewCacheKey(
+        result,
+        contentSearchQuery,
+        contentSearchMode,
+        CONTENT_SNIPPET_MAX_CHARS,
+      );
+      return !textPreviewState[cacheKey] && !textPreviewLoadingState[cacheKey];
+    });
+
+    if (pendingCandidates.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const load = async () => {
+      for (const result of pendingCandidates) {
+        const cacheKey = textPreviewCacheKey(
+          result,
+          contentSearchQuery,
+          contentSearchMode,
+          CONTENT_SNIPPET_MAX_CHARS,
+        );
+
+        setTextPreviewLoadingState((previous) => ({ ...previous, [cacheKey]: true }));
+
+        try {
+          let payload: TextPreviewPayload;
+          try {
+            payload = await loadTextPreviewViaTauri(
+              result.path,
+              CONTENT_SNIPPET_MAX_CHARS,
+              contentSearchQuery,
+              contentSearchMode,
+            );
+          } catch {
+            payload = await loadTextPreviewFallback(
+              result.path,
+              CONTENT_SNIPPET_MAX_CHARS,
+              contentSearchQuery,
+              contentSearchMode,
+            );
+          }
+
+          if (!cancelled && payload.matched) {
+            setTextPreviewState((previous) => ({ ...previous, [cacheKey]: payload }));
+          }
+        } catch {
+          // Ignore per-result text snippet failures.
+        } finally {
+          setTextPreviewLoadingState((previous) => {
+            if (!previous[cacheKey]) {
+              return previous;
+            }
+            const next = { ...previous };
+            delete next[cacheKey];
+            return next;
+          });
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    contentSearchMode,
+    contentSearchQuery,
+    contentSnippetCandidates,
+    hasContentSearchSyntax,
+  ]);
 
   useEffect(() => {
     if (activeTab !== "search") {
@@ -3779,6 +4427,24 @@ function App() {
     }
   }
 
+  async function sendSearchResultToPhone(result: SearchResult): Promise<void> {
+    closeSearchResultContextMenu();
+    if (result.isDirectory || isAppSearchResult(result)) {
+      return;
+    }
+
+    try {
+      await invoke<MobileTransferSnapshot>("send_file_to_mobile", { path: result.path });
+      const info = await invoke<SyncServerInfo>("get_mobile_sync_server_info");
+      setSyncServerInfo(info);
+      setActiveTab("sync");
+      setActionError(null);
+      showActionNotice(`Sending ${resultDisplayName(result)} to phone.`);
+    } catch (error) {
+      setActionError(`Failed to send to phone: ${String(error)}`);
+    }
+  }
+
   function openSearchResultContextMenu(
     event: ReactMouseEvent<HTMLLIElement>,
     result: SearchResult,
@@ -4336,7 +5002,7 @@ function App() {
   const selectedResultAppIconSrc =
     selectedResult && isAppSearchResult(selectedResult)
       ? selectedResult.iconDataUrl ??
-        (selectedResult.appId ? appIconDataUrls[selectedResult.appId] ?? "" : "")
+      (selectedResult.appId ? appIconDataUrls[selectedResult.appId] ?? "" : "")
       : "";
   const selectedResultLocationText = selectedResult ? resultLocationText(selectedResult) : "";
   const selectedResultLocationLabel = selectedResult ? resultLocationLabel(selectedResult) : "Path";
@@ -4349,11 +5015,11 @@ function App() {
     : "";
   const selectedPreviewKind = selectedResult && showPreviews ? previewKindFromResult(selectedResult) : "none";
   const selectedPreviewSources =
-    selectedResult && selectedPreviewKind !== "none"
+    selectedResult && isAssetPreviewKind(selectedPreviewKind)
       ? [
-          ...(previewDataUrls[selectedResultRowKey] ? [previewDataUrls[selectedResultRowKey]] : []),
-          ...previewSourcesFromPath(selectedResult.path),
-        ].filter((source, index, all) => source.length > 0 && all.indexOf(source) === index)
+        ...(previewDataUrls[selectedResultRowKey] ? [previewDataUrls[selectedResultRowKey]] : []),
+        ...previewSourcesFromPath(selectedResult.path),
+      ].filter((source, index, all) => source.length > 0 && all.indexOf(source) === index)
       : [];
   const selectedPreviewIndex = selectedResult ? selectedPreviewSourceIndex : 0;
   const selectedPreviewFailed = selectedPreviewIndex < 0;
@@ -4364,18 +5030,27 @@ function App() {
     selectedPreviewRenderKey && selectedPreviewReadyState[selectedPreviewRenderKey],
   );
   const selectedPreviewSrc =
-    !selectedPreviewFailed && selectedPreviewKind !== "none"
+    !selectedPreviewFailed && isAssetPreviewKind(selectedPreviewKind)
       ? (selectedPreviewSources[selectedPreviewIndex] ?? "")
       : "";
   const hasSelectedPreview = selectedPreviewSrc.length > 0;
+  const selectedTextPreviewKey =
+    selectedResult && selectedPreviewKind === "text"
+      ? textPreviewCacheKey(selectedResult, contentSearchQuery, contentSearchMode, TEXT_PREVIEW_MAX_CHARS)
+      : "";
+  const selectedTextPreview = selectedTextPreviewKey ? textPreviewState[selectedTextPreviewKey] : undefined;
+  const selectedTextPreviewLoading = Boolean(
+    selectedTextPreviewKey && textPreviewLoadingState[selectedTextPreviewKey],
+  );
+  const hasSelectedTextPreview = Boolean(selectedTextPreview?.text);
   const quickLookPreviewKind =
     quickLookOpen && selectedResult ? previewKindFromResult(selectedResult) : "none";
   const quickLookPreviewSources =
-    selectedResult && quickLookPreviewKind !== "none"
+    selectedResult && isAssetPreviewKind(quickLookPreviewKind)
       ? [
-          ...(previewDataUrls[selectedResultRowKey] ? [previewDataUrls[selectedResultRowKey]] : []),
-          ...previewSourcesFromPath(selectedResult.path),
-        ].filter((source, index, all) => source.length > 0 && all.indexOf(source) === index)
+        ...(previewDataUrls[selectedResultRowKey] ? [previewDataUrls[selectedResultRowKey]] : []),
+        ...previewSourcesFromPath(selectedResult.path),
+      ].filter((source, index, all) => source.length > 0 && all.indexOf(source) === index)
       : [];
   const quickLookPreviewIndex = selectedResult ? selectedPreviewSourceIndex : 0;
   const quickLookPreviewFailed = quickLookPreviewIndex < 0;
@@ -4386,10 +5061,19 @@ function App() {
     quickLookPreviewRenderKey && selectedPreviewReadyState[quickLookPreviewRenderKey],
   );
   const quickLookPreviewSrc =
-    !quickLookPreviewFailed && quickLookPreviewKind !== "none"
+    !quickLookPreviewFailed && isAssetPreviewKind(quickLookPreviewKind)
       ? (quickLookPreviewSources[quickLookPreviewIndex] ?? "")
       : "";
   const hasQuickLookPreview = quickLookPreviewSrc.length > 0;
+  const quickLookTextPreviewKey =
+    selectedResult && quickLookPreviewKind === "text"
+      ? textPreviewCacheKey(selectedResult, contentSearchQuery, contentSearchMode, TEXT_PREVIEW_MAX_CHARS)
+      : "";
+  const quickLookTextPreview = quickLookTextPreviewKey ? textPreviewState[quickLookTextPreviewKey] : undefined;
+  const quickLookTextPreviewLoading = Boolean(
+    quickLookTextPreviewKey && textPreviewLoadingState[quickLookTextPreviewKey],
+  );
+  const hasQuickLookTextPreview = Boolean(quickLookTextPreview?.text);
   const selectedResultPositionIndex = selectedResult
     ? visibleResults.findIndex((result) => rowKeyForResult(result) === selectedResultRowKey)
     : -1;
@@ -4412,8 +5096,8 @@ function App() {
     : QUICK_RESULTS_PANE_DEFAULT_RATIO;
   const quickResultsStageStyle = quickSplitResizeEnabled
     ? ({
-        "--quick-results-pane-width": `${(effectiveQuickResultsPaneRatio * 100).toFixed(2)}%`,
-      } as CSSProperties)
+      "--quick-results-pane-width": `${(effectiveQuickResultsPaneRatio * 100).toFixed(2)}%`,
+    } as CSSProperties)
     : undefined;
   const quickPreviewEmptyTitle = searchError
     ? "Search couldn't finish"
@@ -4434,6 +5118,11 @@ function App() {
   const activeSearchResultCanReveal = activeSearchResultMenu
     ? canRevealResultLocation(activeSearchResultMenu)
     : false;
+  const activeSearchResultCanSendToPhone = Boolean(
+    activeSearchResultMenu &&
+    !activeSearchResultMenu.isDirectory &&
+    !activeSearchResultIsApp,
+  );
   const activeSearchResultLocationText = activeSearchResultMenu
     ? resultLocationText(activeSearchResultMenu)
     : "";
@@ -4442,23 +5131,23 @@ function App() {
     : "Path";
   const searchResultContextMenuStyle = searchResultContextMenu
     ? ({
-        left: `${Math.max(
-          12,
-          Math.min(
-            searchResultContextMenu.x,
-            (typeof window !== "undefined" ? window.innerWidth : searchResultContextMenu.x + 260) -
-              272,
-          ),
-        )}px`,
-        top: `${Math.max(
-          12,
-          Math.min(
-            searchResultContextMenu.y,
-            (typeof window !== "undefined" ? window.innerHeight : searchResultContextMenu.y + 320) -
-              332,
-          ),
-        )}px`,
-      } as CSSProperties)
+      left: `${Math.max(
+        12,
+        Math.min(
+          searchResultContextMenu.x,
+          (typeof window !== "undefined" ? window.innerWidth : searchResultContextMenu.x + 260) -
+          272,
+        ),
+      )}px`,
+      top: `${Math.max(
+        12,
+        Math.min(
+          searchResultContextMenu.y,
+          (typeof window !== "undefined" ? window.innerHeight : searchResultContextMenu.y + 320) -
+          332,
+        ),
+      )}px`,
+    } as CSSProperties)
     : undefined;
 
   useEffect(() => {
@@ -4650,9 +5339,9 @@ function App() {
             previous.map((entry) =>
               entry.kind === "item" && entry.appId === appId && !entry.iconDataUrl
                 ? {
-                    ...entry,
-                    iconDataUrl: dataUrl,
-                  }
+                  ...entry,
+                  iconDataUrl: dataUrl,
+                }
                 : entry,
             ),
           );
@@ -4689,8 +5378,8 @@ function App() {
     const previewSources =
       !isQueryEntry && (previewKind === "image" || previewKind === "video")
         ? previewSourcesFromPath(entry.path).filter(
-            (source, index, all) => source.length > 0 && all.indexOf(source) === index,
-          )
+          (source, index, all) => source.length > 0 && all.indexOf(source) === index,
+        )
         : [];
     const previewSrc = previewSources[0] ?? "";
     const iconKind = !isQueryEntry ? iconKindFromResult(entry) : null;
@@ -4710,9 +5399,8 @@ function App() {
     return (
       <article
         key={entryKey}
-        className={`recent-activity-card ${isQueryEntry ? "is-query" : "is-item"} ${
-          isPinnedEntry ? "is-pinned" : ""
-        }`}
+        className={`recent-activity-card ${isQueryEntry ? "is-query" : "is-item"} ${isPinnedEntry ? "is-pinned" : ""
+          }`}
         role="button"
         tabIndex={0}
         onClick={activateCard}
@@ -4724,9 +5412,8 @@ function App() {
         }}
       >
         <div
-          className={`result-preview recent-activity-preview ${isQueryEntry ? "query" : previewKind} ${
-            !isQueryEntry && entry.isDirectory ? "folder" : ""
-          } ${iconKind ? `kind-${iconKind}` : ""}`}
+          className={`result-preview recent-activity-preview ${isQueryEntry ? "query" : previewKind} ${!isQueryEntry && entry.isDirectory ? "folder" : ""
+            } ${iconKind ? `kind-${iconKind}` : ""}`}
           aria-hidden="true"
         >
           {!isQueryEntry ? <ResultFallbackIcon result={entry} className="recent-activity-fallback-icon-shell" /> : null}
@@ -4973,6 +5660,32 @@ function App() {
             </button>
             <button
               type="button"
+              className={`tab ${activeTab === "sync" ? "is-active" : ""}`}
+              style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
+              onClick={() => {
+                setActiveTab("sync");
+              }}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                stroke="currentColor"
+                strokeWidth="2"
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="2" y="3" width="13" height="9" rx="1.5" />
+                <path d="M5 12v3M11 12v3M3 15h11" />
+                <rect x="14" y="6" width="8" height="15" rx="1.5" fill="var(--surface-strong)" />
+                <circle cx="18" cy="18" r="0.5" fill="currentColor" />
+                <path d="M17 8h2" />
+              </svg>
+              <span>Sync</span>
+            </button>
+            <button
+              type="button"
               className={`tab-icon-button ${effectiveSearchMetricsHidden ? "is-active" : ""}`}
               aria-pressed={effectiveSearchMetricsHidden}
               aria-label={searchMetricsToggleLabel}
@@ -5004,9 +5717,8 @@ function App() {
           <section className={`tab-panel ${isQuickMode ? "quick-tab-panel" : ""}`} aria-label="Search files">
             <div className={`status-row ${isQuickMode ? "quick-status-row" : ""}`}>
               <span
-                className={`status-dot ${
-                  status.indexing || indexSyncing ? "live" : status.ready ? "ready" : "idle"
-                }`}
+                className={`status-dot ${status.indexing || indexSyncing ? "live" : status.ready ? "ready" : "idle"
+                  }`}
               />
               <span>{statusText}</span>
             </div>
@@ -5228,10 +5940,10 @@ function App() {
               {actionError ? <p className="error-row">{actionError}</p> : null}
               {actionNotice ? <p className="info-row">{actionNotice}</p> : null}
               {!isQuickMode &&
-              !loading &&
-              !searchError &&
-              visibleResults.length === 0 &&
-              (trimmedQuery || hasFilters) ? (
+                !loading &&
+                !searchError &&
+                visibleResults.length === 0 &&
+                (trimmedQuery || hasFilters) ? (
                 <p className="hint compact-hint">No items match the current filters.</p>
               ) : null}
 
@@ -5265,414 +5977,445 @@ function App() {
                   }
                   style={quickResultsStageStyle}
                 >
-                <div
-                  className={`results-list-shell ${isQuickMode ? "quick-results-column" : ""} ${
-                    isQuickMode && canLoadMore ? "has-overlay-load-more" : ""
-                  }`}
-                >
-                  <ul className={`results-list ${isQuickMode ? "quick-results-list" : ""}`}>
-                    {visibleResults.map((result) => {
-                      const rowKey = rowKeyForResult(result);
-                      const isDirectory = result.isDirectory;
-                      const isAppResult = isAppSearchResult(result);
-                      const normalizedExt = normalizedExtension(result);
-                      const iconKind = iconKindFromResult(result);
-                      const extensionLabel = isAppResult
-                        ? "app"
-                        : isDirectory
-                        ? "folder"
-                        : normalizedExt
-                          ? `.${normalizedExt}`
-                          : "file";
-                      const previewKind = showPreviews ? previewKindFromResult(result) : "none";
-                      const previewSources =
-                        previewKind !== "none"
-                          ? previewSourcesFromPath(result.path).filter(
+                  <div
+                    className={`results-list-shell ${isQuickMode ? "quick-results-column" : ""} ${isQuickMode && canLoadMore ? "has-overlay-load-more" : ""
+                      }`}
+                  >
+                    <ul className={`results-list ${isQuickMode ? "quick-results-list" : ""}`}>
+                      {visibleResults.map((result) => {
+                        const rowKey = rowKeyForResult(result);
+                        const isDirectory = result.isDirectory;
+                        const isAppResult = isAppSearchResult(result);
+                        const normalizedExt = normalizedExtension(result);
+                        const iconKind = iconKindFromResult(result);
+                        const extensionLabel = isAppResult
+                          ? "app"
+                          : isDirectory
+                            ? "folder"
+                            : normalizedExt
+                              ? `.${normalizedExt}`
+                              : "file";
+                        const previewKind = showPreviews ? previewKindFromResult(result) : "none";
+                        const previewSources =
+                          isAssetPreviewKind(previewKind)
+                            ? previewSourcesFromPath(result.path).filter(
                               (source, index, all) =>
                                 source.length > 0 && all.indexOf(source) === index,
                             )
-                          : [];
-                      const activePreviewIndex = previewSourceState[rowKey] ?? 0;
-                      const previewFailed = activePreviewIndex < 0;
-                      const previewRenderKey = `${rowKey}:${activePreviewIndex}:${previewKind}`;
-                      const previewReady = Boolean(previewReadyState[previewRenderKey]);
-                      const previewSrc =
-                        !previewFailed && previewKind !== "none"
-                          ? (previewSources[activePreviewIndex] ?? "")
+                            : [];
+                        const activePreviewIndex = previewSourceState[rowKey] ?? 0;
+                        const previewFailed = activePreviewIndex < 0;
+                        const previewRenderKey = `${rowKey}:${activePreviewIndex}:${previewKind}`;
+                        const previewReady = Boolean(previewReadyState[previewRenderKey]);
+                        const previewSrc =
+                          !previewFailed && isAssetPreviewKind(previewKind)
+                            ? (previewSources[activePreviewIndex] ?? "")
+                            : "";
+                        const hasRenderablePreview = previewSrc.length > 0;
+                        const appIconSrc = isAppResult
+                          ? result.iconDataUrl ?? (result.appId ? appIconDataUrls[result.appId] ?? "" : "")
                           : "";
-                      const hasRenderablePreview = previewSrc.length > 0;
-                      const appIconSrc = isAppResult
-                        ? result.iconDataUrl ?? (result.appId ? appIconDataUrls[result.appId] ?? "" : "")
-                        : "";
-                      const canDragResultFile = !isDirectory && !isAppResult;
-                      const canRevealLocation = canRevealResultLocation(result);
+                        const canDragResultFile = !isDirectory && !isAppResult;
+                        const canRevealLocation = canRevealResultLocation(result);
+                        const contentSnippetKey =
+                          hasContentSearchSyntax && contentSearchQuery && previewKind === "text"
+                            ? textPreviewCacheKey(
+                              result,
+                              contentSearchQuery,
+                              contentSearchMode,
+                              CONTENT_SNIPPET_MAX_CHARS,
+                            )
+                            : "";
+                        const contentSnippet = contentSnippetKey
+                          ? textPreviewState[contentSnippetKey]?.matched
+                            ? textPreviewState[contentSnippetKey]?.text ?? ""
+                            : ""
+                          : "";
 
-                      return (
-                        <li
-                          key={rowKey}
-                          className={`result-row clickable ${isQuickMode ? "quick-result-row" : ""} ${
-                            (isQuickMode || quickLookOpen) && rowKey === selectedResultRowKey
-                              ? "is-selected"
-                              : ""
-                          } ${canDragResultFile ? "draggable-file" : ""}`}
-                          data-result-key={rowKey}
-                          draggable={canDragResultFile}
-                          onDragStart={(event) => {
-                            handleSearchResultDragStart(event, result);
-                          }}
-                          onContextMenu={(event) => {
-                            openSearchResultContextMenu(event, result, rowKey);
-                          }}
-                          role="button"
-                          tabIndex={0}
-                          title={
-                            isQuickMode
-                              ? "Click to select, press Space for Quick Look, double-click to open"
-                              : "Click to select, press Space for Quick Look, double-click to open"
-                          }
-                          onFocus={() => {
-                            setSelectedResultKey(rowKey);
-                          }}
-                          onClick={(event) => {
-                            if (hasSelectedText()) {
-                              return;
+                        return (
+                          <li
+                            key={rowKey}
+                            className={`result-row clickable ${isQuickMode ? "quick-result-row" : ""} ${(isQuickMode || quickLookOpen) && rowKey === selectedResultRowKey
+                                ? "is-selected"
+                                : ""
+                              } ${canDragResultFile ? "draggable-file" : ""}`}
+                            data-result-key={rowKey}
+                            draggable={canDragResultFile}
+                            onDragStart={(event) => {
+                              handleSearchResultDragStart(event, result);
+                            }}
+                            onContextMenu={(event) => {
+                              openSearchResultContextMenu(event, result, rowKey);
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            title={
+                              isQuickMode
+                                ? "Click to select, press Space for Quick Look, double-click to open"
+                                : "Click to select, press Space for Quick Look, double-click to open"
                             }
-                            event.currentTarget.focus();
-                            setSelectedResultKey(rowKey);
-                          }}
-                          onDoubleClick={() => {
-                            if (hasSelectedText()) {
-                              return;
-                            }
-                            void launchSearchResult(result);
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                              event.preventDefault();
-                              void launchSearchResult(result);
-                            } else if (event.key === " ") {
-                              event.preventDefault();
-                              if (isEditableTarget(event.target)) {
+                            onFocus={() => {
+                              setSelectedResultKey(rowKey);
+                            }}
+                            onClick={(event) => {
+                              if (hasSelectedText()) {
                                 return;
                               }
-                              openQuickLook(rowKey, event.currentTarget);
-                            }
-                          }}
-                        >
-                          {showPreviews ? (
-                            <div
-                              className={`result-preview ${previewKind} ${isDirectory ? "folder" : ""} kind-${iconKind}`}
-                              aria-hidden="true"
-                            >
-                              <ResultFallbackIcon result={result} className="preview-fallback-icon-shell" />
-                              {appIconSrc.length > 0 ? (
-                                <img
-                                  className="preview-media ready app-result-icon-media"
-                                  src={appIconSrc}
-                                  alt=""
-                                  loading="lazy"
-                                />
-                              ) : hasRenderablePreview && previewKind === "image" ? (
-                                <img
-                                  key={`${rowKey}:${activePreviewIndex}:image`}
-                                  className={`preview-media ${previewReady ? "ready" : ""}`}
-                                  src={previewSrc}
-                                  alt=""
-                                  loading="lazy"
-                                  onLoad={() => {
-                                    handlePreviewReady(previewRenderKey);
-                                  }}
-                                  onError={() => {
-                                    handlePreviewError(rowKey, previewSources.length);
-                                  }}
-                                />
+                              event.currentTarget.focus();
+                              setSelectedResultKey(rowKey);
+                            }}
+                            onDoubleClick={() => {
+                              if (hasSelectedText()) {
+                                return;
+                              }
+                              void launchSearchResult(result);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void launchSearchResult(result);
+                              } else if (event.key === " ") {
+                                event.preventDefault();
+                                if (isEditableTarget(event.target)) {
+                                  return;
+                                }
+                                openQuickLook(rowKey, event.currentTarget);
+                              }
+                            }}
+                          >
+                            {showPreviews ? (
+                              <div
+                                className={`result-preview ${previewKind} ${isDirectory ? "folder" : ""} kind-${iconKind}`}
+                                aria-hidden="true"
+                              >
+                                <ResultFallbackIcon result={result} className="preview-fallback-icon-shell" />
+                                {appIconSrc.length > 0 ? (
+                                  <img
+                                    className="preview-media ready app-result-icon-media"
+                                    src={appIconSrc}
+                                    alt=""
+                                    loading="lazy"
+                                  />
+                                ) : hasRenderablePreview && previewKind === "image" ? (
+                                  <img
+                                    key={`${rowKey}:${activePreviewIndex}:image`}
+                                    className={`preview-media ${previewReady ? "ready" : ""}`}
+                                    src={previewSrc}
+                                    alt=""
+                                    loading="lazy"
+                                    onLoad={() => {
+                                      handlePreviewReady(previewRenderKey);
+                                    }}
+                                    onError={() => {
+                                      handlePreviewError(rowKey, previewSources.length);
+                                    }}
+                                  />
+                                ) : null}
+                                {hasRenderablePreview && previewKind === "video" ? (
+                                  <video
+                                    key={`${rowKey}:${activePreviewIndex}:video`}
+                                    className={`preview-media ${previewReady ? "ready" : ""}`}
+                                    src={previewSrc}
+                                    muted
+                                    playsInline
+                                    preload="metadata"
+                                    onLoadedData={() => {
+                                      handlePreviewReady(previewRenderKey);
+                                    }}
+                                    onError={() => {
+                                      handlePreviewError(rowKey, previewSources.length);
+                                    }}
+                                  />
+                                ) : null}
+                                {hasRenderablePreview && previewKind === "pdf" ? (
+                                  <iframe
+                                    key={`${rowKey}:${activePreviewIndex}:pdf`}
+                                    className={`preview-media ${previewReady ? "ready" : ""}`}
+                                    src={`${previewSrc}#toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH`}
+                                    title=""
+                                    loading="lazy"
+                                    onLoad={() => {
+                                      handlePreviewReady(previewRenderKey);
+                                    }}
+                                    onError={() => {
+                                      handlePreviewError(rowKey, previewSources.length);
+                                    }}
+                                  />
+                                ) : null}
+                              </div>
+                            ) : (
+                              <div className={`result-icon ${isDirectory ? "folder" : ""} kind-${iconKind}`} aria-hidden="true">
+                                {appIconSrc.length > 0 ? (
+                                  <img className="result-icon-image" src={appIconSrc} alt="" loading="lazy" />
+                                ) : (
+                                  <ResultTypeIcon kind={iconKind} className="result-icon-glyph" />
+                                )}
+                              </div>
+                            )}
+
+                            <div className="result-main">
+                              <strong>{highlightMatch(result.name, displayQuery)}</strong>
+                              {contentSnippet ? (
+                                <span className="result-content-snippet">
+                                  {highlightMatch(contentSnippet, contentSearchQuery, "content")}
+                                </span>
                               ) : null}
-                              {hasRenderablePreview && previewKind === "video" ? (
-                                <video
-                                  key={`${rowKey}:${activePreviewIndex}:video`}
-                                  className={`preview-media ${previewReady ? "ready" : ""}`}
-                                  src={previewSrc}
-                                  muted
-                                  playsInline
-                                  preload="metadata"
-                                  onLoadedData={() => {
-                                    handlePreviewReady(previewRenderKey);
-                                  }}
-                                  onError={() => {
-                                    handlePreviewError(rowKey, previewSources.length);
-                                  }}
-                                />
-                              ) : null}
-                              {hasRenderablePreview && previewKind === "pdf" ? (
-                                <iframe
-                                  key={`${rowKey}:${activePreviewIndex}:pdf`}
-                                  className={`preview-media ${previewReady ? "ready" : ""}`}
-                                  src={`${previewSrc}#toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH`}
-                                  title=""
-                                  loading="lazy"
-                                  onLoad={() => {
-                                    handlePreviewReady(previewRenderKey);
-                                  }}
-                                  onError={() => {
-                                    handlePreviewError(rowKey, previewSources.length);
-                                  }}
-                                />
-                              ) : null}
+                              <span className="result-location">{highlightMatch(result.path, displayQuery)}</span>
                             </div>
-                          ) : (
-                            <div className={`result-icon ${isDirectory ? "folder" : ""} kind-${iconKind}`} aria-hidden="true">
-                              {appIconSrc.length > 0 ? (
-                                <img className="result-icon-image" src={appIconSrc} alt="" loading="lazy" />
+                            <div className="result-meta">
+                              <span className="meta-chip">{isAppResult ? "app" : extensionLabel}</span>
+                              {isAppResult ? (
+                                <span className="meta-chip">
+                                  {result.revealPath ? "Desktop app" : "Installed app"}
+                                </span>
                               ) : (
-                                <ResultTypeIcon kind={iconKind} className="result-icon-glyph" />
+                                <>
+                                  <span className="meta-chip">{formatBytes(result.size)}</span>
+                                  <span className="meta-chip">{formatUnix(result.createdUnix)}</span>
+                                </>
                               )}
                             </div>
-                          )}
-
-                          <div className="result-main">
-                            <strong>{highlightMatch(result.name, displayQuery)}</strong>
-                            <span>{highlightMatch(result.path, displayQuery)}</span>
-                          </div>
-                          <div className="result-meta">
-                            <span className="meta-chip">{isAppResult ? "app" : extensionLabel}</span>
-                            {isAppResult ? (
-                              <span className="meta-chip">
-                                {result.revealPath ? "Desktop app" : "Installed app"}
-                              </span>
-                            ) : (
-                              <>
-                                <span className="meta-chip">{formatBytes(result.size)}</span>
-                                <span className="meta-chip">{formatUnix(result.createdUnix)}</span>
-                              </>
-                            )}
-                          </div>
-                          <div className="result-actions">
-                            <button
-                              type="button"
-                              className="row-action"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void launchSearchResult(result);
-                              }}
-                            >
-                              Open
-                            </button>
-                            {canRevealLocation ? (
+                            <div className="result-actions">
                               <button
                                 type="button"
                                 className="row-action"
                                 onClick={(event) => {
                                   event.stopPropagation();
-                                  void revealSearchResult(result);
+                                  void launchSearchResult(result);
                                 }}
                               >
-                                Folder
+                                Open
                               </button>
-                            ) : null}
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
+                              {canRevealLocation ? (
+                                <button
+                                  type="button"
+                                  className="row-action"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void revealSearchResult(result);
+                                  }}
+                                >
+                                  Folder
+                                </button>
+                              ) : null}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
 
-                {isQuickMode && canLoadMore ? (
-                  <div className="load-more-row quick-load-more-row">
-                    <button type="button" className="load-more-button" onClick={loadMoreResults}>
-                      {`Load more (+${defaultSearchLimit.toLocaleString()})`}
-                    </button>
+                    {isQuickMode && canLoadMore ? (
+                      <div className="load-more-row quick-load-more-row">
+                        <button type="button" className="load-more-button" onClick={loadMoreResults}>
+                          {`Load more (+${defaultSearchLimit.toLocaleString()})`}
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>
 
-              {quickSplitResizeEnabled ? (
-                <div
-                  className={`quick-preview-splitter ${quickSplitDragging ? "is-dragging" : ""}`}
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-label="Resize quick results and preview panels"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={Math.round(effectiveQuickResultsPaneRatio * 100)}
-                  tabIndex={0}
-                  title="Drag to resize results and preview. Double-click to reset."
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    setQuickSplitDragging(true);
-                  }}
-                  onDoubleClick={() => {
-                    setQuickResultsPaneRatio(QUICK_RESULTS_PANE_DEFAULT_RATIO);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "ArrowLeft") {
-                      event.preventDefault();
-                      adjustQuickResultsPaneRatio(-0.02);
-                    } else if (event.key === "ArrowRight") {
-                      event.preventDefault();
-                      adjustQuickResultsPaneRatio(0.02);
-                    } else if (event.key === "Home") {
-                      event.preventDefault();
-                      setQuickResultsPaneRatio(0.3);
-                    } else if (event.key === "End") {
-                      event.preventDefault();
-                      setQuickResultsPaneRatio(0.7);
-                    }
-                  }}
-                >
-                  <span className="quick-preview-splitter-grip" aria-hidden="true" />
-                </div>
-              ) : null}
+                  {quickSplitResizeEnabled ? (
+                    <div
+                      className={`quick-preview-splitter ${quickSplitDragging ? "is-dragging" : ""}`}
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="Resize quick results and preview panels"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Math.round(effectiveQuickResultsPaneRatio * 100)}
+                      tabIndex={0}
+                      title="Drag to resize results and preview. Double-click to reset."
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        setQuickSplitDragging(true);
+                      }}
+                      onDoubleClick={() => {
+                        setQuickResultsPaneRatio(QUICK_RESULTS_PANE_DEFAULT_RATIO);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "ArrowLeft") {
+                          event.preventDefault();
+                          adjustQuickResultsPaneRatio(-0.02);
+                        } else if (event.key === "ArrowRight") {
+                          event.preventDefault();
+                          adjustQuickResultsPaneRatio(0.02);
+                        } else if (event.key === "Home") {
+                          event.preventDefault();
+                          setQuickResultsPaneRatio(0.3);
+                        } else if (event.key === "End") {
+                          event.preventDefault();
+                          setQuickResultsPaneRatio(0.7);
+                        }
+                      }}
+                    >
+                      <span className="quick-preview-splitter-grip" aria-hidden="true" />
+                    </div>
+                  ) : null}
 
-              {isQuickMode ? (
-                <aside className="quick-preview-panel" aria-label="Selected file preview">
-                  {selectedResult ? (
-                    <div className="quick-preview-surface">
-                      <div
-                        className={`quick-preview-stage ${selectedPreviewKind} ${
-                          selectedResultIsDirectory ? "folder" : ""
-                        } kind-${selectedResultIconKind}`}
-                      >
-                        <span className={`result-fallback-icon-shell kind-${selectedResultIconKind} quick-preview-fallback-icon-shell`} aria-hidden="true">
-                          <ResultTypeIcon kind={selectedResultIconKind} className="result-fallback-icon" />
-                        </span>
-                        {selectedResultAppIconSrc.length > 0 ? (
-                          <img
-                            className="preview-media ready app-result-icon-media"
-                            src={selectedResultAppIconSrc}
-                            alt=""
-                            loading="lazy"
-                          />
-                        ) : hasSelectedPreview && selectedPreviewKind === "image" ? (
-                          <img
-                            key={`${selectedResultRowKey}:${selectedPreviewIndex}:image:quick`}
-                            className={`preview-media ${selectedPreviewReady ? "ready" : ""}`}
-                            src={selectedPreviewSrc}
-                            alt=""
-                            loading="lazy"
-                            onLoad={() => {
-                              handleSelectedPreviewReady(selectedPreviewRenderKey);
-                            }}
-                            onError={() => {
-                              handleSelectedPreviewError(selectedPreviewSources.length);
-                            }}
-                          />
-                        ) : null}
-                        {hasSelectedPreview && selectedPreviewKind === "video" ? (
-                          <video
-                            key={`${selectedResultRowKey}:${selectedPreviewIndex}:video:quick`}
-                            className={`preview-media ${selectedPreviewReady ? "ready" : ""}`}
-                            src={selectedPreviewSrc}
-                            controls
-                            muted
-                            playsInline
-                            preload="metadata"
-                            onLoadedData={() => {
-                              handleSelectedPreviewReady(selectedPreviewRenderKey);
-                            }}
-                            onError={() => {
-                              handleSelectedPreviewError(selectedPreviewSources.length);
-                            }}
-                          />
-                        ) : null}
-                        {hasSelectedPreview && selectedPreviewKind === "pdf" ? (
-                          <iframe
-                            key={`${selectedResultRowKey}:${selectedPreviewIndex}:pdf:quick`}
-                            className={`preview-media ${selectedPreviewReady ? "ready" : ""}`}
-                            src={`${selectedPreviewSrc}#toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH`}
-                            title={selectedResult.name}
-                            loading="lazy"
-                            onLoad={() => {
-                              handleSelectedPreviewReady(selectedPreviewRenderKey);
-                            }}
-                            onError={() => {
-                              handleSelectedPreviewError(selectedPreviewSources.length);
-                            }}
-                          />
-                        ) : null}
-                        {!hasSelectedPreview && selectedResultAppIconSrc.length === 0 ? (
-                          <div className="quick-preview-placeholder">
-                            <strong>{showPreviews ? "Preview unavailable" : "Preview disabled"}</strong>
-                            <span>
-                              {showPreviews
-                                ? "This file type cannot be rendered here yet, but you can still inspect the metadata and open it."
-                                : "Turn previews back on from the toolbar to load images, video, and PDF previews."}
-                            </span>
-                          </div>
-                        ) : null}
-                      </div>
-
-                      <div className="quick-preview-body">
-                        <div className="quick-preview-header">
-                          <div className="quick-preview-copy">
-                            <strong>{selectedResult.name}</strong>
-                            <span>{selectedResult.path}</span>
-                          </div>
-                          <div className="quick-preview-actions">
-                            <button
-                              type="button"
-                              className="row-action"
-                              onClick={() => {
-                                void launchSearchResult(selectedResult);
-                              }}
-                            >
-                              {isAppSearchResult(selectedResult) ? "Open app" : "Open file"}
-                            </button>
-                            {canRevealResultLocation(selectedResult) ? (
-                              <button
-                                type="button"
-                                className="row-action"
-                                onClick={() => {
-                                  void revealSearchResult(selectedResult);
+                  {isQuickMode ? (
+                    <aside className="quick-preview-panel" aria-label="Selected file preview">
+                      {selectedResult ? (
+                        <div className="quick-preview-surface">
+                          <div
+                            className={`quick-preview-stage ${selectedPreviewKind} ${selectedResultIsDirectory ? "folder" : ""
+                              } kind-${selectedResultIconKind}`}
+                          >
+                            {!hasSelectedPreview && !hasSelectedTextPreview && selectedResultAppIconSrc.length === 0 ? (
+                              <span className={`result-fallback-icon-shell kind-${selectedResultIconKind} quick-preview-fallback-icon-shell`} aria-hidden="true">
+                                <ResultTypeIcon kind={selectedResultIconKind} className="result-fallback-icon" />
+                              </span>
+                            ) : null}
+                            {selectedResultAppIconSrc.length > 0 ? (
+                              <img
+                                className="preview-media ready app-result-icon-media"
+                                src={selectedResultAppIconSrc}
+                                alt=""
+                                loading="lazy"
+                              />
+                            ) : hasSelectedPreview && selectedPreviewKind === "image" ? (
+                              <img
+                                key={`${selectedResultRowKey}:${selectedPreviewIndex}:image:quick`}
+                                className={`preview-media ${selectedPreviewReady ? "ready" : ""}`}
+                                src={selectedPreviewSrc}
+                                alt=""
+                                loading="lazy"
+                                onLoad={() => {
+                                  handleSelectedPreviewReady(selectedPreviewRenderKey);
                                 }}
-                              >
-                                Reveal folder
-                              </button>
+                                onError={() => {
+                                  handleSelectedPreviewError(selectedPreviewSources.length);
+                                }}
+                              />
+                            ) : null}
+                            {hasSelectedPreview && selectedPreviewKind === "video" ? (
+                              <video
+                                key={`${selectedResultRowKey}:${selectedPreviewIndex}:video:quick`}
+                                className={`preview-media ${selectedPreviewReady ? "ready" : ""}`}
+                                src={selectedPreviewSrc}
+                                controls
+                                muted
+                                playsInline
+                                preload="metadata"
+                                onLoadedData={() => {
+                                  handleSelectedPreviewReady(selectedPreviewRenderKey);
+                                }}
+                                onError={() => {
+                                  handleSelectedPreviewError(selectedPreviewSources.length);
+                                }}
+                              />
+                            ) : null}
+                            {hasSelectedPreview && selectedPreviewKind === "pdf" ? (
+                              <iframe
+                                key={`${selectedResultRowKey}:${selectedPreviewIndex}:pdf:quick`}
+                                className={`preview-media ${selectedPreviewReady ? "ready" : ""}`}
+                                src={`${selectedPreviewSrc}#toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH`}
+                                title={selectedResult.name}
+                                loading="lazy"
+                                onLoad={() => {
+                                  handleSelectedPreviewReady(selectedPreviewRenderKey);
+                                }}
+                                onError={() => {
+                                  handleSelectedPreviewError(selectedPreviewSources.length);
+                                }}
+                              />
+                            ) : null}
+                            {hasSelectedTextPreview && selectedPreviewKind === "text" ? (
+                              <pre className="text-preview-content">
+                                {highlightMatch(selectedTextPreview?.text ?? "", contentSearchQuery, "content")}
+                              </pre>
+                            ) : null}
+                            {!hasSelectedPreview && !hasSelectedTextPreview && selectedResultAppIconSrc.length === 0 ? (
+                              <div className="quick-preview-placeholder">
+                                <strong>
+                                  {selectedPreviewKind === "text" && selectedTextPreviewLoading
+                                    ? "Loading text preview"
+                                    : showPreviews
+                                      ? "Preview unavailable"
+                                      : "Preview disabled"}
+                                </strong>
+                                <span>
+                                  {selectedPreviewKind === "text" && selectedTextPreviewLoading
+                                    ? "Reading the file and preparing a text preview."
+                                    : showPreviews
+                                      ? "This file type cannot be rendered here yet, but you can still inspect the metadata and open it."
+                                      : "Turn previews back on from the toolbar to load images, video, PDF, and text previews."}
+                                </span>
+                              </div>
                             ) : null}
                           </div>
-                        </div>
 
-                        <div className="quick-preview-meta">
-                          <div className="quick-preview-meta-card">
-                            <span>Type</span>
-                            <strong>{isAppSearchResult(selectedResult) ? "app" : selectedResultExtensionLabel}</strong>
+                          <div className="quick-preview-body">
+                            <div className="quick-preview-header">
+                              <div className="quick-preview-copy">
+                                <strong>{selectedResult.name}</strong>
+                                <span>{selectedResult.path}</span>
+                              </div>
+                              <div className="quick-preview-actions">
+                                <button
+                                  type="button"
+                                  className="row-action"
+                                  onClick={() => {
+                                    void launchSearchResult(selectedResult);
+                                  }}
+                                >
+                                  {isAppSearchResult(selectedResult) ? "Open app" : "Open file"}
+                                </button>
+                                {canRevealResultLocation(selectedResult) ? (
+                                  <button
+                                    type="button"
+                                    className="row-action"
+                                    onClick={() => {
+                                      void revealSearchResult(selectedResult);
+                                    }}
+                                  >
+                                    Reveal folder
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+
+                            <div className="quick-preview-meta">
+                              <div className="quick-preview-meta-card">
+                                <span>Type</span>
+                                <strong>{isAppSearchResult(selectedResult) ? "app" : selectedResultExtensionLabel}</strong>
+                              </div>
+                              {isAppSearchResult(selectedResult) ? (
+                                <>
+                                  <div className="quick-preview-meta-card">
+                                    <span>Kind</span>
+                                    <strong>{selectedResult.revealPath ? "Desktop app" : "Installed app"}</strong>
+                                  </div>
+                                  <div className="quick-preview-meta-card quick-preview-meta-card-wide">
+                                    <span>{selectedResultLocationLabel}</span>
+                                    <strong>{selectedResultLocationText}</strong>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <div className="quick-preview-meta-card">
+                                    <span>Size</span>
+                                    <strong>{formatBytes(selectedResult.size)}</strong>
+                                  </div>
+                                  <div className="quick-preview-meta-card">
+                                    <span>Created</span>
+                                    <strong>{formatUnix(selectedResult.createdUnix)}</strong>
+                                  </div>
+                                  <div className="quick-preview-meta-card">
+                                    <span>Modified</span>
+                                    <strong>{formatUnix(selectedResult.modifiedUnix)}</strong>
+                                  </div>
+                                </>
+                              )}
+                            </div>
                           </div>
-                          {isAppSearchResult(selectedResult) ? (
-                            <>
-                              <div className="quick-preview-meta-card">
-                                <span>Kind</span>
-                                <strong>{selectedResult.revealPath ? "Desktop app" : "Installed app"}</strong>
-                              </div>
-                              <div className="quick-preview-meta-card quick-preview-meta-card-wide">
-                                <span>{selectedResultLocationLabel}</span>
-                                <strong>{selectedResultLocationText}</strong>
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className="quick-preview-meta-card">
-                                <span>Size</span>
-                                <strong>{formatBytes(selectedResult.size)}</strong>
-                              </div>
-                              <div className="quick-preview-meta-card">
-                                <span>Created</span>
-                                <strong>{formatUnix(selectedResult.createdUnix)}</strong>
-                              </div>
-                              <div className="quick-preview-meta-card">
-                                <span>Modified</span>
-                                <strong>{formatUnix(selectedResult.modifiedUnix)}</strong>
-                              </div>
-                            </>
-                          )}
                         </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="quick-preview-empty">
-                      <strong>{quickPreviewEmptyTitle}</strong>
-                      {quickPreviewEmptyDetail ? <span>{quickPreviewEmptyDetail}</span> : null}
-                    </div>
-                  )}
-                </aside>
-              ) : null}
+                      ) : (
+                        <div className="quick-preview-empty">
+                          <strong>{quickPreviewEmptyTitle}</strong>
+                          {quickPreviewEmptyDetail ? <span>{quickPreviewEmptyDetail}</span> : null}
+                        </div>
+                      )}
+                    </aside>
+                  ) : null}
                 </div>
               )}
 
@@ -6051,9 +6794,8 @@ function App() {
                   <div className="desktop-settings-grid">
                     <button
                       type="button"
-                      className={`settings-switch-card settings-switch-card-button ${
-                        desktopSettingsDraft.backgroundModeEnabled ? "is-active" : ""
-                      }`}
+                      className={`settings-switch-card settings-switch-card-button ${desktopSettingsDraft.backgroundModeEnabled ? "is-active" : ""
+                        }`}
                       role="switch"
                       aria-checked={desktopSettingsDraft.backgroundModeEnabled}
                       disabled={desktopSettingsSaving || desktopSettingsLoading}
@@ -6074,9 +6816,8 @@ function App() {
                         </span>
                       </div>
                       <span
-                        className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${
-                          desktopSettingsDraft.backgroundModeEnabled ? "is-on" : ""
-                        }`}
+                        className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${desktopSettingsDraft.backgroundModeEnabled ? "is-on" : ""
+                          }`}
                         aria-hidden="true"
                       >
                         <span className="scan-switch-slider" aria-hidden="true" />
@@ -6086,9 +6827,8 @@ function App() {
 
                     <button
                       type="button"
-                      className={`settings-switch-card settings-switch-card-button ${
-                        desktopSettingsDraft.shortcutEnabled ? "is-active" : ""
-                      }`}
+                      className={`settings-switch-card settings-switch-card-button ${desktopSettingsDraft.shortcutEnabled ? "is-active" : ""
+                        }`}
                       role="switch"
                       aria-checked={desktopSettingsDraft.shortcutEnabled}
                       disabled={desktopSettingsSaving || desktopSettingsLoading}
@@ -6109,9 +6849,8 @@ function App() {
                         </span>
                       </div>
                       <span
-                        className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${
-                          desktopSettingsDraft.shortcutEnabled ? "is-on" : ""
-                        }`}
+                        className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${desktopSettingsDraft.shortcutEnabled ? "is-on" : ""
+                          }`}
                         aria-hidden="true"
                       >
                         <span className="scan-switch-slider" aria-hidden="true" />
@@ -6121,9 +6860,8 @@ function App() {
 
                     <button
                       type="button"
-                      className={`settings-switch-card settings-switch-card-button ${
-                        desktopSettingsDraft.rememberWindowBounds ? "is-active" : ""
-                      }`}
+                      className={`settings-switch-card settings-switch-card-button ${desktopSettingsDraft.rememberWindowBounds ? "is-active" : ""
+                        }`}
                       role="switch"
                       aria-checked={desktopSettingsDraft.rememberWindowBounds}
                       disabled={
@@ -6146,9 +6884,8 @@ function App() {
                         </span>
                       </div>
                       <span
-                        className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${
-                          desktopSettingsDraft.rememberWindowBounds ? "is-on" : ""
-                        }`}
+                        className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${desktopSettingsDraft.rememberWindowBounds ? "is-on" : ""
+                          }`}
                         aria-hidden="true"
                       >
                         <span className="scan-switch-slider" aria-hidden="true" />
@@ -6331,9 +7068,8 @@ function App() {
 
                   <button
                     type="button"
-                    className={`settings-switch-card settings-switch-card-button ${
-                      includeInstalledApps ? "is-active" : ""
-                    }`}
+                    className={`settings-switch-card settings-switch-card-button ${includeInstalledApps ? "is-active" : ""
+                      }`}
                     role="switch"
                     aria-checked={includeInstalledApps}
                     onClick={() => {
@@ -6347,9 +7083,8 @@ function App() {
                       </span>
                     </div>
                     <span
-                      className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${
-                        includeInstalledApps ? "is-on" : ""
-                      }`}
+                      className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${includeInstalledApps ? "is-on" : ""
+                        }`}
                       aria-hidden="true"
                     >
                       <span className="scan-switch-slider" aria-hidden="true" />
@@ -6393,9 +7128,8 @@ function App() {
 
                   <button
                     type="button"
-                    className={`settings-switch-card settings-switch-card-button ${
-                      recentActivityEnabled ? "is-active" : ""
-                    }`}
+                    className={`settings-switch-card settings-switch-card-button ${recentActivityEnabled ? "is-active" : ""
+                      }`}
                     role="switch"
                     aria-checked={recentActivityEnabled}
                     onClick={() => {
@@ -6410,9 +7144,8 @@ function App() {
                       </span>
                     </div>
                     <span
-                      className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${
-                        recentActivityEnabled ? "is-on" : ""
-                      }`}
+                      className={`scan-switch settings-switch-toggle settings-switch-toggle-button ${recentActivityEnabled ? "is-on" : ""
+                        }`}
                       aria-hidden="true"
                     >
                       <span className="scan-switch-slider" aria-hidden="true" />
@@ -6550,9 +7283,8 @@ function App() {
                     <button
                       key={section.id}
                       type="button"
-                      className={`syntax-help-topic ${
-                        activeSearchSyntaxHelpSection.id === section.id ? "is-active" : ""
-                      }`}
+                      className={`syntax-help-topic ${activeSearchSyntaxHelpSection.id === section.id ? "is-active" : ""
+                        }`}
                       onClick={() => {
                         setSearchSyntaxHelpSectionId(section.id);
                       }}
@@ -6621,8 +7353,8 @@ function App() {
 
         {activeTab === "about" ? (
           <section className="tab-panel scrollable-tab-panel" aria-label="About OmniSearch and developer">
-            <div className="about-panel about-panel-flat">
-              <div className="about-header">
+            <div className="about-panel about-panel-flat sync-panel">
+              <div className="sync-title-row">
                 <div>
                   <h2>About OmniSearch</h2>
                   <p className="about-tagline">
@@ -6695,19 +7427,19 @@ function App() {
                         onClick={() => {
                           void openExternalLink(item.url);
                         }}
-                        >
-                          <div className="developer-app-card-top">
-                            <span className={`developer-app-icon-shell is-${item.accent}`} aria-hidden="true">
-                              <img
-                                className="developer-app-icon-image"
-                                src={item.iconSrc}
-                                alt=""
-                                draggable={false}
-                              />
-                            </span>
-                            <div className="developer-app-copy">
-                              <strong>{item.name}</strong>
-                              <span>{item.blurb}</span>
+                      >
+                        <div className="developer-app-card-top">
+                          <span className={`developer-app-icon-shell is-${item.accent}`} aria-hidden="true">
+                            <img
+                              className="developer-app-icon-image"
+                              src={item.iconSrc}
+                              alt=""
+                              draggable={false}
+                            />
+                          </span>
+                          <div className="developer-app-copy">
+                            <strong>{item.name}</strong>
+                            <span>{item.blurb}</span>
                           </div>
                         </div>
                         <div className="developer-app-card-footer">
@@ -6725,6 +7457,294 @@ function App() {
           </section>
         ) : null}
 
+        {activeTab === "sync" ? (
+          <section className="tab-panel scrollable-tab-panel" aria-label="Mobile Sync Settings">
+            <div className="about-panel about-panel-flat sync-panel">
+              <div className="about-header">
+                <div>
+                  <h2>Mobile App Sync</h2>
+                  <p className="about-tagline">
+                    Connect the native OmniSearch Android companion app to search, view duplicates, and trigger actions remotely.
+                  </p>
+                  <div className="sync-status-row">
+                    <span className={`sync-status-pill ${syncServerInfo?.running ? "live" : "idle"}`}>
+                      <span className="status-dot" aria-hidden="true" />
+                      {syncServerInfo?.running ? "Server running" : "Server stopped"}
+                    </span>
+                    {syncServerInfo?.running ? (
+                      <>
+                        <span className={`sync-status-pill ${syncServerInfo.connectedClients > 0 ? "live" : "idle"}`}>
+                          <span className="status-dot" aria-hidden="true" />
+                          {syncServerInfo.connectedClients > 0
+                            ? `${syncServerInfo.connectedClients} phone${syncServerInfo.connectedClients === 1 ? "" : "s"} connected`
+                            : "Waiting for phone"}
+                        </span>
+                        <button
+                          type="button"
+                          className="sync-icon-button"
+                          title="Refresh server status and IP address"
+                          disabled={syncBusy}
+                          onClick={async () => {
+                            setSyncBusy(true);
+                            try {
+                              const info = await invoke<SyncServerInfo>("get_mobile_sync_server_info");
+                              setSyncServerInfo(info);
+                            } catch (err) {
+                              setSyncError(String(err));
+                            } finally {
+                              setSyncBusy(false);
+                            }
+                          }}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            style={{ animation: syncBusy ? "spin 1s linear infinite" : "none" }}
+                          >
+                            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+                          </svg>
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+              {syncError && (
+                <div className="error-row" style={{ margin: "18px 0 0", padding: "12px", borderRadius: "8px", backgroundColor: "rgba(255, 117, 117, 0.12)", border: "1px solid rgba(255, 117, 117, 0.35)", color: "var(--danger)" }}>
+                  {syncError}
+                </div>
+              )}
+
+              {!syncServerInfo || !syncServerInfo.running ? (
+                <section className="sync-empty-state" aria-label="Start Sync Server">
+                  <div className="sync-detail-group">
+                    <span className="sync-label">Setup</span>
+                    <p>
+                      Start the local sync server, then scan the QR code from the Android companion app while both devices are on the same Wi-Fi network.
+                    </p>
+                  </div>
+                  <div className="sync-actions-row">
+                    <button
+                      type="button"
+                      className="sync-action-button primary"
+                      disabled={syncBusy}
+                      onClick={startSyncServer}
+                    >
+                      {syncBusy ? "Starting..." : "Start Sync Server"}
+                    </button>
+                  </div>
+                </section>
+              ) : (
+                <div className="about-sections" style={{ marginTop: 0, width: "100%" }}>
+                  <div style={{ display: "flex", justifyContent: "center", width: "100%", marginTop: "8px" }}>
+                    <section
+                      className="sync-card"
+                      aria-label="Scan QR Code"
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        textAlign: "center",
+                        width: "min(340px, 100%)",
+                        padding: "20px 20px 16px",
+                        gap: "0"
+                      }}
+                    >
+                      {syncServerInfo.connectedClients > 0 ? (
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "16px 0 8px", gap: "10px" }}>
+                          <div style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            width: "48px",
+                            height: "48px",
+                            borderRadius: "50%",
+                            background: "rgba(34, 197, 94, 0.12)",
+                            color: "#22c55e",
+                            border: "1.5px solid rgba(34, 197, 94, 0.3)"
+                          }}>
+                            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          </div>
+                          <strong style={{ color: "#22c55e", fontSize: "1rem", fontWeight: 600 }}>Connected Successfully</strong>
+                          <p style={{ fontSize: "12px", color: "var(--text-muted)", maxWidth: "240px", margin: 0, lineHeight: "1.45" }}>
+                            Phone is connected and syncing.
+                          </p>
+                        </div>
+                      ) : (
+                        <>
+                          <span
+                            className="about-support-label"
+                            style={{ letterSpacing: "1.5px", fontSize: "10px", fontWeight: "bold", color: "var(--accent)", textTransform: "uppercase", marginBottom: "10px" }}
+                          >
+                            SCAN QR TO PAIR
+                          </span>
+                          {syncServerInfo.qrSvg ? (
+                            <>
+                              <style>{`
+                                .qr-code-svg-container svg {
+                                  width: 100% !important;
+                                  height: 100% !important;
+                                  display: block !important;
+                                }
+                              `}</style>
+                              <div
+                                className="qr-code-svg-container"
+                                dangerouslySetInnerHTML={{ __html: syncServerInfo.qrSvg }}
+                              />
+                            </>
+                          ) : (
+                            <div style={{ width: "130px", height: "130px", background: "var(--surface-muted)", borderRadius: "10px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                              <span style={{ color: "var(--text-muted)", fontSize: "11px" }}>Generating QR...</span>
+                            </div>
+                          )}
+                          <p style={{ fontSize: "11px", color: "var(--text-muted)", margin: "10px 0 14px", maxWidth: "220px", lineHeight: "1.45" }}>
+                            Open the scanner on the Android settings tab to pair automatically.
+                          </p>
+                          <div style={{ width: "100%", textAlign: "left" }}>
+                            <span style={{ display: "block", fontSize: "9px", fontWeight: "bold", color: "var(--text-muted)", letterSpacing: "0.8px", marginBottom: "5px", textTransform: "uppercase" }}>
+                              Pairing Address URI
+                            </span>
+                            <div style={{ display: "flex", gap: "6px", width: "100%" }}>
+                              <input
+                                type="text"
+                                readOnly
+                                value={syncServerInfo.pairingUri}
+                                style={{ flex: 1, padding: "6px 10px", background: "var(--surface-input)", border: "1px solid var(--border-soft)", borderRadius: "6px", color: "var(--text-main)", fontSize: "11px", fontFamily: "monospace", textOverflow: "ellipsis", minWidth: 0 }}
+                              />
+                              <button
+                                type="button"
+                                className={`ghost-button ${pairingUriCopied ? "success" : ""}`}
+                                style={{
+                                  padding: "6px 12px",
+                                  borderColor: pairingUriCopied ? "#22c55e" : undefined,
+                                  color: pairingUriCopied ? "#22c55e" : undefined,
+                                  background: pairingUriCopied ? "rgba(34, 197, 94, 0.08)" : undefined,
+                                  fontSize: "11px",
+                                  fontWeight: 500,
+                                  cursor: "pointer",
+                                  transition: "all 0.2s ease",
+                                  flexShrink: 0
+                                }}
+                                onClick={() => {
+                                  void navigator.clipboard.writeText(syncServerInfo.pairingUri);
+                                  setPairingUriCopied(true);
+                                  setTimeout(() => setPairingUriCopied(false), 2000);
+                                }}
+                              >
+                                {pairingUriCopied ? "✓ Copied" : "Copy"}
+                              </button>
+                            </div>
+                          </div>
+                        </>
+                      )}
+
+                      <button
+                        type="button"
+                        className="about-support-button"
+                        style={{
+                          padding: "8px 16px",
+                          marginTop: "14px",
+                          width: "fit-content",
+                          minWidth: "148px",
+                          alignSelf: "center",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          textAlign: "center",
+                          background: "rgba(255, 117, 117, 0.1)",
+                          color: "var(--danger)",
+                          border: "1px solid rgba(255, 117, 117, 0.2)",
+                          borderRadius: "7px",
+                          cursor: "pointer",
+                          fontWeight: "bold",
+                          fontSize: "12px",
+                          transition: "all 0.2s ease"
+                        }}
+                        disabled={syncBusy}
+                        onClick={stopSyncServer}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = "rgba(255, 117, 117, 0.18)";
+                          e.currentTarget.style.borderColor = "rgba(255, 117, 117, 0.35)";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = "rgba(255, 117, 117, 0.1)";
+                          e.currentTarget.style.borderColor = "rgba(255, 117, 117, 0.2)";
+                        }}
+                      >
+                        {syncBusy ? "Stopping..." : "Stop Sync Server"}
+                      </button>
+                    </section>
+                  </div>
+
+                  {syncServerInfo?.fileTransfers?.length ? (
+                    <section className="sync-transfer-panel" aria-label="Phone transfer progress">
+                      <div className="sync-transfer-header">
+                        <span className="sync-label">Phone Transfers</span>
+                        <span>{syncServerInfo.fileTransfers.length} recent</span>
+                      </div>
+                      <div className="sync-transfer-list">
+                        {syncServerInfo.fileTransfers.map((transfer) => {
+                        const percent = transfer.size > 0
+                          ? Math.min(100, Math.round((transfer.bytesSent / transfer.size) * 100))
+                          : transfer.status === "completed" ? 100 : 0;
+                        return (
+                          <div className="sync-transfer-row" key={transfer.id}>
+                            <div className="sync-transfer-copy">
+                              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                <strong>{transfer.name}</strong>
+                                {transfer.status === "completed" && transfer.path && (
+                                  <button
+                                    className="sync-transfer-folder-btn"
+                                    title="Open file location"
+                                    onClick={() => revealResult(transfer.path)}
+                                    style={{
+                                      background: "none",
+                                      border: "none",
+                                      cursor: "pointer",
+                                      padding: "2px",
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      opacity: 0.7,
+                                      transition: "opacity 0.15s",
+                                    }}
+                                    onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+                                    onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.7")}
+                                  >
+                                    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                      <path d="M2 5.5C2 4.11929 3.11929 3 4.5 3H7.58579C8.11622 3 8.62493 3.21071 9 3.58579L10.4142 5H15.5C16.8807 5 18 6.11929 18 7.5V14.5C18 15.8807 16.8807 17 15.5 17H4.5C3.11929 17 2 15.8807 2 14.5V5.5Z" fill="var(--accent)" opacity="0.8"/>
+                                    </svg>
+                                  </button>
+                                )}
+                              </div>
+                              <span>
+                                {transfer.status === "failed"
+                                  ? transfer.error || "Transfer failed"
+                                  : `${formatBytes(transfer.bytesSent)} / ${formatBytes(transfer.size)} - ${transfer.status}`}
+                              </span>
+                            </div>
+                            <div className="sync-transfer-meter" aria-label={`${transfer.name} ${percent}%`}>
+                              <span style={{ width: `${percent}%` }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ) : null}
+
+
+              </div>
+            )}
+            </div>
+          </section>
+        ) : null}
+
         {activeTab === "search" && searchResultContextMenu && activeSearchResultMenu ? (
           <div
             ref={searchResultContextMenuRef}
@@ -6734,65 +7754,81 @@ function App() {
             onClick={(event) => {
               event.stopPropagation();
             }}
+          >
+            <button
+              type="button"
+              className="result-context-menu-item"
+              role="menuitem"
+              onClick={() => {
+                closeSearchResultContextMenu();
+                void launchSearchResult(activeSearchResultMenu);
+              }}
             >
+              {activeSearchResultMenu.isDirectory
+                ? "Open folder"
+                : activeSearchResultIsApp
+                  ? "Open app"
+                  : "Open file"}
+            </button>
+            {!activeSearchResultMenu.isDirectory && activeSearchResultCanReveal ? (
               <button
                 type="button"
                 className="result-context-menu-item"
                 role="menuitem"
-              onClick={() => {
+                onClick={() => {
                   closeSearchResultContextMenu();
-                  void launchSearchResult(activeSearchResultMenu);
+                  void openResultPath(activeSearchResultMenu);
                 }}
               >
-                {activeSearchResultMenu.isDirectory
-                  ? "Open folder"
-                  : activeSearchResultIsApp
-                    ? "Open app"
-                    : "Open file"}
+                {activeSearchResultIsApp ? "Open app location" : "Open containing folder"}
               </button>
-              {!activeSearchResultMenu.isDirectory && activeSearchResultCanReveal ? (
+            ) : null}
+            {!activeSearchResultIsApp ? (
+              <>
                 <button
                   type="button"
                   className="result-context-menu-item"
                   role="menuitem"
                   onClick={() => {
                     closeSearchResultContextMenu();
-                    void openResultPath(activeSearchResultMenu);
+                    void openResultInConsole(activeSearchResultMenu);
                   }}
                 >
-                  {activeSearchResultIsApp ? "Open app location" : "Open containing folder"}
+                  <span className="result-context-menu-item-icon" aria-hidden="true">
+                    <ConsoleIcon />
+                  </span>
+                  <span className="result-context-menu-item-label">Open path in console</span>
                 </button>
-              ) : null}
-              {!activeSearchResultIsApp ? (
-                <>
+                {activeSearchResultCanSendToPhone ? (
                   <button
                     type="button"
                     className="result-context-menu-item"
                     role="menuitem"
+                    disabled={!(syncServerInfo?.running && syncServerInfo.connectedClients > 0)}
                     onClick={() => {
-                      closeSearchResultContextMenu();
-                      void openResultInConsole(activeSearchResultMenu);
+                      void sendSearchResultToPhone(activeSearchResultMenu);
                     }}
                   >
                     <span className="result-context-menu-item-icon" aria-hidden="true">
-                      <ConsoleIcon />
+                      <PhoneIcon />
                     </span>
-                    <span className="result-context-menu-item-label">Open path in console</span>
+                    <span className="result-context-menu-item-label">Send to phone</span>
                   </button>
-                  <button
-                    type="button"
-                    className="result-context-menu-item"
-                    role="menuitem"
-                    onClick={() => {
-                      openSearchResultRename(activeSearchResultMenu, searchResultContextMenu.rowKey);
-                    }}
-                  >
-                    Rename
-                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="result-context-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    openSearchResultRename(activeSearchResultMenu, searchResultContextMenu.rowKey);
+                  }}
+                >
+                  Rename
+                </button>
 
-                  <div className="result-context-menu-divider" />
-                </>
-              ) : null}
+                <div className="result-context-menu-divider" />
+              </>
+            ) : null}
 
             <button
               type="button"
@@ -6817,9 +7853,9 @@ function App() {
                   closeSearchResultContextMenu();
                   void handleSearchResultCopy(resultDisplayName(activeSearchResultMenu), "folder name");
                 }}
-                >
-                  Copy folder name
-                </button>
+              >
+                Copy folder name
+              </button>
             ) : !activeSearchResultIsApp ? (
               <>
                 <button
@@ -6942,12 +7978,14 @@ function App() {
                 <div
                   className={`quick-look-stage ${selectedResultIsDirectory ? "folder" : ""} kind-${selectedResultIconKind}`}
                 >
-                  <span
-                    className={`result-fallback-icon-shell kind-${selectedResultIconKind} quick-look-fallback-icon-shell`}
-                    aria-hidden="true"
-                  >
-                    <ResultTypeIcon kind={selectedResultIconKind} className="result-fallback-icon" />
-                  </span>
+                  {!hasQuickLookPreview && !hasQuickLookTextPreview && selectedResultAppIconSrc.length === 0 ? (
+                    <span
+                      className={`result-fallback-icon-shell kind-${selectedResultIconKind} quick-look-fallback-icon-shell`}
+                      aria-hidden="true"
+                    >
+                      <ResultTypeIcon kind={selectedResultIconKind} className="result-fallback-icon" />
+                    </span>
+                  ) : null}
                   {selectedResultAppIconSrc.length > 0 ? (
                     <img
                       className="preview-media ready app-result-icon-media"
@@ -7002,17 +8040,26 @@ function App() {
                       }}
                     />
                   ) : null}
-                  {!hasQuickLookPreview && selectedResultAppIconSrc.length === 0 ? (
+                  {hasQuickLookTextPreview && quickLookPreviewKind === "text" ? (
+                    <pre className="text-preview-content">
+                      {highlightMatch(quickLookTextPreview?.text ?? "", contentSearchQuery, "content")}
+                    </pre>
+                  ) : null}
+                  {!hasQuickLookPreview && !hasQuickLookTextPreview && selectedResultAppIconSrc.length === 0 ? (
                     <div className="quick-look-placeholder">
                       <strong>
-                        {quickLookPreviewKind === "none"
-                          ? "Large preview isn't available for this result yet"
-                          : "Preview couldn't be loaded"}
+                        {quickLookPreviewKind === "text" && quickLookTextPreviewLoading
+                          ? "Loading text preview"
+                          : quickLookPreviewKind === "none"
+                            ? "Large preview isn't available for this result yet"
+                            : "Preview couldn't be loaded"}
                       </strong>
                       <span>
-                        {quickLookPreviewKind === "none"
-                          ? "Quick Look still gives you a bigger read on the file details so you can decide whether to open it."
-                          : "Try opening the file directly, or move through the results with the Arrow keys to inspect another match."}
+                        {quickLookPreviewKind === "text" && quickLookTextPreviewLoading
+                          ? "Reading the file and preparing a larger text preview."
+                          : quickLookPreviewKind === "none"
+                            ? "Quick Look still gives you a bigger read on the file details so you can decide whether to open it."
+                            : "Try opening the file directly, or move through the results with the Arrow keys to inspect another match."}
                       </span>
                     </div>
                   ) : null}
@@ -7050,13 +8097,12 @@ function App() {
                         <span>{selectedResultLocationLabel}</span>
                         <button
                           type="button"
-                          className={`quick-look-copy-button ${
-                            quickLookCopyState === "copied"
+                          className={`quick-look-copy-button ${quickLookCopyState === "copied"
                               ? "is-copied"
                               : quickLookCopyState === "error"
                                 ? "is-error"
                                 : ""
-                          }`}
+                            }`}
                           aria-label={
                             quickLookCopyState === "copied"
                               ? "Path copied"
@@ -7124,9 +8170,9 @@ function App() {
                     setSearchResultRenameDraft((previous) =>
                       previous
                         ? {
-                            ...previous,
-                            nextName: value,
-                          }
+                          ...previous,
+                          nextName: value,
+                        }
                         : previous,
                     );
                   }}
@@ -7226,6 +8272,105 @@ function App() {
                       ? "Recycle"
                       : "Delete"}
                 </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {syncServerInfo?.running && syncServerInfo.pendingApprovals.length > 0 ? (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            style={{
+              backdropFilter: "blur(12px)",
+              WebkitBackdropFilter: "blur(12px)",
+              background: "rgba(5, 7, 15, 0.75)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center"
+            }}
+          >
+            <div
+              className="modal-card"
+              style={{
+                width: "min(440px, 90vw)",
+                border: "1px solid var(--border-soft)",
+                background: "color-mix(in srgb, var(--surface-strong) 98%, #000)",
+                borderRadius: "14px",
+                padding: "20px 24px",
+                boxShadow: "0 20px 50px rgba(0,0,0,0.6)"
+              }}
+            >
+              <h3 style={{ margin: "0 0 4px 0", fontSize: "1.1rem", fontWeight: 700, color: "var(--text-main)" }}>
+                Phone Pairing Request
+              </h3>
+              <p style={{ margin: "0 0 16px 0", fontSize: "0.84rem", color: "var(--text-muted)" }}>
+                A mobile companion device is attempting to connect to your PC.
+              </p>
+              
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                {syncServerInfo.pendingApprovals.map((req) => (
+                  <div
+                    key={req.deviceId}
+                    style={{
+                      background: "rgba(255, 255, 255, 0.03)",
+                      border: "1px solid var(--border-soft)",
+                      borderRadius: "10px",
+                      padding: "14px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "12px"
+                    }}
+                  >
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                      <strong style={{ color: "var(--text-main)", fontSize: "0.95rem" }}>
+                        {req.deviceName}
+                      </strong>
+                      <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                        IP Address: {req.peerAddress}
+                      </span>
+                      <span style={{ fontSize: "0.74rem", color: "var(--text-muted)", fontFamily: "monospace" }}>
+                        ID: {req.deviceId}
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", gap: "10px", marginTop: "4px" }}>
+                      <button
+                        type="button"
+                        className="row-action"
+                        style={{
+                          flex: 1,
+                          background: "var(--accent)",
+                          color: "var(--bg-deep)",
+                          border: "none",
+                          borderRadius: "8px",
+                          fontWeight: "bold",
+                          padding: "10px",
+                          cursor: "pointer",
+                          fontSize: "0.84rem"
+                        }}
+                        onClick={() => approvePairing(req.deviceId)}
+                      >
+                        Approve Connection
+                      </button>
+                      <button
+                        type="button"
+                        className="row-action danger-row-action"
+                        style={{
+                          flex: 0.4,
+                          borderRadius: "8px",
+                          padding: "10px",
+                          cursor: "pointer",
+                          fontSize: "0.84rem"
+                        }}
+                        onClick={() => rejectPairing(req.deviceId)}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           </div>

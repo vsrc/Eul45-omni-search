@@ -12,6 +12,20 @@ src-tauri/gen/schemas/
 src-tauri/*.pdb
 *.pdb
 
+# Android companion app outputs and local files
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/.env
+android/*.jks
+android/debug.keystore
+android/debug.keystore.base64
+android/build/
+android/app/build/
+android/captures/
+android/.externalNativeBuild/
+android/.cxx/
+
 # Logs
 logs/
 *.log

@@ -2859,7 +2859,24 @@ extern "C" __declspec(dllexport) char* omni_search_files_json(
       ParseSearchQuery(Utf8ToWide(query_utf8 == nullptr ? "" : query_utf8));
   const std::wstring& query = parsed_query.path_query_lower;
   const std::wstring extension_filter = NormalizeExtensionFilter(extension_utf8);
-  const bool has_extension_filter = !extension_filter.empty();
+  std::unordered_set<std::wstring> extension_set;
+  if (!extension_filter.empty()) {
+    size_t start = 0;
+    while (start <= extension_filter.size()) {
+      const size_t delimiter = extension_filter.find(L',', start);
+      const size_t end =
+          delimiter == std::wstring::npos ? extension_filter.size() : delimiter;
+      std::wstring normalized = NormalizeExtensionValue(extension_filter.substr(start, end - start));
+      if (!normalized.empty()) {
+        extension_set.insert(std::move(normalized));
+      }
+      if (delimiter == std::wstring::npos) {
+        break;
+      }
+      start = delimiter + 1;
+    }
+  }
+  const bool has_extension_filter = !extension_set.empty();
   const bool extension_targets_directories =
       extension_filter == L"folder" || extension_filter == L"folders" ||
       extension_filter == L"dir" || extension_filter == L"directory";
@@ -2903,7 +2920,7 @@ extern "C" __declspec(dllexport) char* omni_search_files_json(
             continue;
           }
         } else if (file.is_directory ||
-                   IndexedFileExtensionLower(file) != extension_filter) {
+                   extension_set.find(IndexedFileExtensionLower(file)) == extension_set.end()) {
           continue;
         }
       }
