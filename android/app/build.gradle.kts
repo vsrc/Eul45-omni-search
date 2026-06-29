@@ -9,6 +9,21 @@ android {
   namespace = "com.omnisearch.app"
   compileSdk = 36
 
+  val androidKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+    ?: System.getenv("KEYSTORE_PATH")
+    ?: "${rootDir}/my-upload-key.jks"
+  val androidStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+    ?: System.getenv("STORE_PASSWORD")
+  val androidKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+    ?: System.getenv("KEY_ALIAS")
+    ?: "upload"
+  val androidKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+    ?: System.getenv("KEY_PASSWORD")
+  val hasAndroidSigningKey = file(androidKeystorePath).isFile &&
+    !androidStorePassword.isNullOrBlank() &&
+    androidKeyAlias.isNotBlank() &&
+    !androidKeyPassword.isNullOrBlank()
+
   defaultConfig {
     applicationId = "com.omnisearch.app"
     minSdk = 24
@@ -21,11 +36,10 @@ android {
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      storeFile = file(androidKeystorePath)
+      storePassword = androidStorePassword
+      keyAlias = androidKeyAlias
+      keyPassword = androidKeyPassword
     }
   }
 
@@ -40,7 +54,11 @@ android {
     create("preview") {
       initWith(getByName("release"))
       matchingFallbacks += listOf("release")
-      signingConfig = signingConfigs.getByName("debug")
+      signingConfig = if (hasAndroidSigningKey) {
+        signingConfigs.getByName("release")
+      } else {
+        signingConfigs.getByName("debug")
+      }
     }
     debug {
       // Uses Android Gradle Plugin's default debug signing key.

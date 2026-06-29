@@ -11,6 +11,7 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
+import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -776,7 +777,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun createDownloadUri(fileName: String, contentType: String): Uri? {
-        val mimeType = contentType.ifEmpty { "application/octet-stream" }
+        val mimeType = storageMimeType(fileName, contentType)
         val categoryDir = transferFolderName(fileName, mimeType)
         val subDir = when {
             isImageTransfer(fileName, mimeType) -> Environment.DIRECTORY_PICTURES
@@ -844,6 +845,40 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun fileExtension(fileName: String): String =
         fileName.substringAfterLast('.', "").lowercase()
+
+    private fun storageMimeType(fileName: String, contentType: String): String {
+        val extension = fileExtension(fileName)
+        val normalized = contentType.ifBlank { "application/octet-stream" }.lowercase()
+
+        val mapped = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+        if (!mapped.isNullOrBlank() && mapped != "text/plain") {
+            return mapped
+        }
+
+        return when (extension) {
+            "txt" -> "text/plain"
+            "md" -> "text/markdown"
+            "log" -> "text/plain"
+            "csv" -> "text/csv"
+            "json" -> "application/json"
+            "xml" -> "application/xml"
+            "pdf" -> "application/pdf"
+            "doc" -> "application/msword"
+            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "xls" -> "application/vnd.ms-excel"
+            "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "ppt" -> "application/vnd.ms-powerpoint"
+            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            "odt" -> "application/vnd.oasis.opendocument.text"
+            "ods" -> "application/vnd.oasis.opendocument.spreadsheet"
+            "odp" -> "application/vnd.oasis.opendocument.presentation"
+            "rtf" -> "application/rtf"
+            "rs", "py", "java", "js", "ts", "tsx", "jsx", "kt", "cpp", "c", "h",
+            "html", "css", "go", "rb", "sh", "bat", "ps1", "toml", "yaml", "yml",
+            "ini", "cfg", "conf" -> "application/octet-stream"
+            else -> normalized.takeUnless { it == "text/plain" } ?: "application/octet-stream"
+        }
+    }
 
     private fun isImageTransfer(fileName: String, mimeType: String): Boolean =
         mimeType.startsWith("image/") ||
@@ -989,7 +1024,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val bytes = Base64.decode(base64Data, Base64.DEFAULT)
-                val mimeType = contentType.ifEmpty { "application/octet-stream" }
+                val mimeType = storageMimeType(fileName, contentType)
                 val subDir = when {
                     mimeType.startsWith("image/") -> Environment.DIRECTORY_PICTURES
                     else -> Environment.DIRECTORY_DOWNLOADS

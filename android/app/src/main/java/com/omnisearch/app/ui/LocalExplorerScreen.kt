@@ -1,6 +1,8 @@
 package com.omnisearch.app.ui
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -20,6 +22,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.Window
 import android.view.WindowManager
+import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
@@ -1049,9 +1052,29 @@ fun LocalExplorerScreen(
                         if (uris.isEmpty()) return
                         val intent =
                                 Intent().apply {
-                                        action = Intent.ACTION_SEND_MULTIPLE
-                                        putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                                        type = "*/*"
+                                        action =
+                                                if (uris.size == 1) Intent.ACTION_SEND
+                                                else Intent.ACTION_SEND_MULTIPLE
+                                        if (uris.size == 1) {
+                                                putExtra(Intent.EXTRA_STREAM, uris.first())
+                                                type = externalMimeTypeForFile(files.first())
+                                        } else {
+                                                putParcelableArrayListExtra(
+                                                        Intent.EXTRA_STREAM,
+                                                        uris
+                                                )
+                                                type = "*/*"
+                                        }
+                                        clipData =
+                                                ClipData.newUri(
+                                                        context.contentResolver,
+                                                        files.first().name,
+                                                        uris.first()
+                                                ).apply {
+                                                        uris.drop(1).forEach { uri ->
+                                                                addItem(ClipData.Item(uri))
+                                                        }
+                                                }
                                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                 }
                         context.startActivity(Intent.createChooser(intent, "Share files via"))
@@ -3883,6 +3906,14 @@ fun ExplorerHeader(
                                         }
                                 }
 
+                                IconButton(onClick = onThemesClick) {
+                                        Icon(
+                                                Icons.Default.Palette,
+                                                contentDescription = "Themes",
+                                                tint = FluentTheme.colors.textColor
+                                        )
+                                }
+
                                 // Sorting & Options Menu
                                 var showMenu by remember { mutableStateOf(false) }
                                 Box {
@@ -4234,21 +4265,6 @@ fun ExplorerHeader(
                                                                 }
                                                         )
                                                 }
-
-                                                DropdownMenuItem(
-                                                        text = {
-                                                                Text(
-                                                                        "Themes",
-                                                                        color =
-                                                                                FluentTheme.colors
-                                                                                        .textColor
-                                                                )
-                                                        },
-                                                        onClick = {
-                                                                showMenu = false
-                                                                onThemesClick()
-                                                        }
-                                                )
 
                                                 DropdownMenuItem(
                                                         text = {
@@ -9994,6 +10010,62 @@ private fun getFileIcon(file: File): Pair<androidx.compose.ui.graphics.vector.Im
         }
 }
 
+private fun externalMimeTypeForFile(file: File): String {
+        val extension = file.extension.lowercase()
+        val mapped = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+        if (!mapped.isNullOrBlank()) return mapped
+
+        return when (extension) {
+                "doc" -> "application/msword"
+                "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                "xls" -> "application/vnd.ms-excel"
+                "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                "ppt" -> "application/vnd.ms-powerpoint"
+                "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                "odt" -> "application/vnd.oasis.opendocument.text"
+                "ods" -> "application/vnd.oasis.opendocument.spreadsheet"
+                "odp" -> "application/vnd.oasis.opendocument.presentation"
+                "rtf" -> "application/rtf"
+                "csv" -> "text/csv"
+                "json" -> "application/json"
+                "xml" -> "application/xml"
+                "md", "log", "toml", "yaml", "yml", "ini", "cfg", "conf",
+                "rs", "py", "java", "js", "ts", "tsx", "jsx", "kt", "cpp", "c", "h",
+                "html", "css", "go", "rb", "sh", "bat", "ps1" -> "text/plain"
+                else -> "*/*"
+        }
+}
+
+private fun launchExternalViewer(context: Context, file: File, mimeType: String) {
+        val uri =
+                FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        file
+                )
+        val intent =
+                Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, mimeType)
+                        clipData = ClipData.newUri(context.contentResolver, file.name, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+
+        try {
+                context.startActivity(Intent.createChooser(intent, "Open with"))
+        } catch (firstError: ActivityNotFoundException) {
+                if (mimeType == "*/*") throw firstError
+                val fallback =
+                        Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, "*/*")
+                                clipData = ClipData.newUri(context.contentResolver, file.name, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                context.startActivity(Intent.createChooser(fallback, "Open with"))
+        }
+}
+
 private fun openLocalFile(
         file: File,
         context: Context,
@@ -10029,25 +10101,12 @@ private fun openLocalFile(
                         LocalMusicPlayerManager.play(file, musicFiles)
                 }
                 else -> {
-                        // Launch generic open intent using FileProvider
                         try {
-                                val uri =
-                                        FileProvider.getUriForFile(
-                                                context,
-                                                "${context.packageName}.fileprovider",
-                                                file
-                                        )
-                                val mime = context.contentResolver.getType(uri) ?: "*/*"
-                                val intent =
-                                        Intent(Intent.ACTION_VIEW).apply {
-                                                setDataAndType(uri, mime)
-                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                        }
-                                context.startActivity(intent)
+                                launchExternalViewer(context, file, externalMimeTypeForFile(file))
                         } catch (e: Exception) {
                                 Toast.makeText(
                                                 context,
-                                                "No app available to open this file",
+                                                "No app available to open this file: ${e.localizedMessage}",
                                                 Toast.LENGTH_SHORT
                                         )
                                         .show()
