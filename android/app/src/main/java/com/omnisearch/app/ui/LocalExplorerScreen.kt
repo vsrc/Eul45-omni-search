@@ -3906,12 +3906,14 @@ fun ExplorerHeader(
                                         }
                                 }
 
-                                IconButton(onClick = onThemesClick) {
-                                        Icon(
-                                                Icons.Default.Palette,
-                                                contentDescription = "Themes",
-                                                tint = FluentTheme.colors.textColor
-                                        )
+                                if (currentView == ExplorerView.HOME) {
+                                        IconButton(onClick = onThemesClick) {
+                                                Icon(
+                                                        Icons.Default.Palette,
+                                                        contentDescription = "Themes",
+                                                        tint = FluentTheme.colors.textColor
+                                                )
+                                        }
                                 }
 
                                 // Sorting & Options Menu
