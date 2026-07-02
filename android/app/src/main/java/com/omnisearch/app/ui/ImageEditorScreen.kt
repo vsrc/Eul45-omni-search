@@ -44,6 +44,7 @@ import coil.compose.AsyncImage
 import com.omnisearch.app.ui.theme.FluentTheme
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.roundToInt
 
 // ---------------- EDITOR TOOL CATEGORY ----------------
 enum class EditorToolCategory { TRANSFORM, FILTER, ADJUST, DRAW }
@@ -207,6 +208,10 @@ fun AdvancedImageEditor(
     // Screen container dimensions
     var containerWidth by remember { mutableStateOf(0f) }
     var containerHeight by remember { mutableStateOf(0f) }
+    var imageDisplayLeft by remember { mutableStateOf(0f) }
+    var imageDisplayTop by remember { mutableStateOf(0f) }
+    var imageDisplayWidth by remember { mutableStateOf(1f) }
+    var imageDisplayHeight by remember { mutableStateOf(1f) }
 
     // Aspect ratio locking helper
     fun applyAspectRatioLock(ratio: String) {
@@ -337,6 +342,12 @@ fun AdvancedImageEditor(
                                 contrast = contrast,
                                 saturation = saturation,
                                 drawPaths = drawPaths,
+                                imageDisplayLeft = imageDisplayLeft,
+                                imageDisplayTop = imageDisplayTop,
+                                imageDisplayWidth = imageDisplayWidth,
+                                imageDisplayHeight = imageDisplayHeight,
+                                containerWidth = containerWidth,
+                                containerHeight = containerHeight,
                                 onSaved = onSaved
                             )
                         },
@@ -393,6 +404,12 @@ fun AdvancedImageEditor(
                     } else {
                         androidx.compose.ui.geometry.Rect(0f, 0f, wBox, hBox)
                     }
+                }
+                LaunchedEffect(fitRect) {
+                    imageDisplayLeft = fitRect.left
+                    imageDisplayTop = fitRect.top
+                    imageDisplayWidth = fitRect.width.coerceAtLeast(1f)
+                    imageDisplayHeight = fitRect.height.coerceAtLeast(1f)
                 }
 
                 // Image Container Box with rotations & mirrors
@@ -1088,6 +1105,12 @@ private fun saveEditedImage(
     contrast: Float,
     saturation: Float,
     drawPaths: List<StrokePath>,
+    imageDisplayLeft: Float,
+    imageDisplayTop: Float,
+    imageDisplayWidth: Float,
+    imageDisplayHeight: Float,
+    containerWidth: Float,
+    containerHeight: Float,
     onSaved: (File) -> Unit
 ) {
     try {
@@ -1107,15 +1130,40 @@ private fun saveEditedImage(
         matrix.postScale(scaleX, scaleY)
         matrix.postRotate(baseRotation + fineRotation)
         var transformed = Bitmap.createBitmap(srcBitmap, 0, 0, wImg, hImg, matrix, true)
+        val transformedWidthBeforeCrop = transformed.width
+        val transformedHeightBeforeCrop = transformed.height
+        val safeDisplayWidth = imageDisplayWidth.coerceAtLeast(1f)
+        val safeDisplayHeight = imageDisplayHeight.coerceAtLeast(1f)
+
+        fun screenToTransformedX(screenX: Float): Float =
+            (((screenX - imageDisplayLeft) / safeDisplayWidth).coerceIn(0f, 1f) *
+                transformedWidthBeforeCrop)
+
+        fun screenToTransformedY(screenY: Float): Float =
+            (((screenY - imageDisplayTop) / safeDisplayHeight).coerceIn(0f, 1f) *
+                transformedHeightBeforeCrop)
+
+        var cropOffsetX = 0
+        var cropOffsetY = 0
 
         // 2. Crop
         if (isCropActive) {
             val tW = transformed.width
             val tH = transformed.height
-            val x = (cropLeft * tW).toInt().coerceIn(0, tW - 10)
-            val y = (cropTop * tH).toInt().coerceIn(0, tH - 10)
-            val width = ((cropRight - cropLeft) * tW).toInt().coerceIn(10, tW - x)
-            val height = ((cropBottom - cropTop) * tH).toInt().coerceIn(10, tH - y)
+            val cropScreenLeft = cropLeft * containerWidth
+            val cropScreenTop = cropTop * containerHeight
+            val cropScreenRight = cropRight * containerWidth
+            val cropScreenBottom = cropBottom * containerHeight
+            val leftPx = screenToTransformedX(cropScreenLeft).roundToInt()
+            val topPx = screenToTransformedY(cropScreenTop).roundToInt()
+            val rightPx = screenToTransformedX(cropScreenRight).roundToInt()
+            val bottomPx = screenToTransformedY(cropScreenBottom).roundToInt()
+            val x = minOf(leftPx, rightPx).coerceIn(0, tW - 10)
+            val y = minOf(topPx, bottomPx).coerceIn(0, tH - 10)
+            val width = (maxOf(leftPx, rightPx) - x).coerceIn(10, tW - x)
+            val height = (maxOf(topPx, bottomPx) - y).coerceIn(10, tH - y)
+            cropOffsetX = x
+            cropOffsetY = y
             val cropped = Bitmap.createBitmap(transformed, x, y, width, height)
             if (transformed != srcBitmap) transformed.recycle()
             transformed = cropped
@@ -1141,10 +1189,9 @@ private fun saveEditedImage(
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
-            // Screen-to-image scale calculations to locate stroke points
-            // Since drawPaths are recorded in screen coords, map them back to bitmap dimensions
-            // A simple scale mapping of screen box container to cropped bitmap bounds:
-            // We assume linear coordinate transformation. To be safe, map based on ratio:
+            val strokeScale =
+                ((transformedWidthBeforeCrop / safeDisplayWidth) +
+                    (transformedHeightBeforeCrop / safeDisplayHeight)) / 2f
             drawPaths.forEach { stroke ->
                 if (stroke.points.size > 1) {
                     drawPaint.color = android.graphics.Color.argb(
@@ -1153,23 +1200,18 @@ private fun saveEditedImage(
                         (stroke.color.green * 255).toInt(),
                         (stroke.color.blue * 255).toInt()
                     )
-                    drawPaint.strokeWidth = stroke.strokeWidth * (finalBitmap.width / 1080f).coerceAtLeast(1f)
+                    drawPaint.strokeWidth = (stroke.strokeWidth * strokeScale).coerceAtLeast(1f)
 
                     val path = android.graphics.Path()
-                    // Map first point
                     val p0 = stroke.points[0]
-                    // Normalize assuming standard box scale: mapping is done in AdvancedImageEditor to fitRect bounds
-                    // So we scale points from coordinate space
-                    // We can map coordinates relative to fitRect!
-                    // Let's approximate:
-                    val startX = (p0.x / 1080f) * finalBitmap.width
-                    val startY = (p0.y / 1920f) * finalBitmap.height
+                    val startX = screenToTransformedX(p0.x) - cropOffsetX
+                    val startY = screenToTransformedY(p0.y) - cropOffsetY
                     path.moveTo(startX, startY)
 
                     for (i in 1 until stroke.points.size) {
                         val pt = stroke.points[i]
-                        val x = (pt.x / 1080f) * finalBitmap.width
-                        val y = (pt.y / 1920f) * finalBitmap.height
+                        val x = screenToTransformedX(pt.x) - cropOffsetX
+                        val y = screenToTransformedY(pt.y) - cropOffsetY
                         path.lineTo(x, y)
                     }
                     canvas.drawPath(path, drawPaint)

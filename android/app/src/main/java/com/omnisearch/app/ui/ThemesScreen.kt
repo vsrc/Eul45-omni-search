@@ -27,6 +27,8 @@ import androidx.compose.ui.unit.sp
 import com.omnisearch.app.ui.theme.FluentTheme
 import com.omnisearch.app.ui.theme.LightFluentColors
 import com.omnisearch.app.ui.theme.DarkFluentColors
+import com.omnisearch.app.ui.theme.LightMistColors
+import com.omnisearch.app.ui.theme.DarkMistColors
 import com.omnisearch.app.ui.theme.LightOceanColors
 import com.omnisearch.app.ui.theme.DarkOceanColors
 import com.omnisearch.app.ui.theme.LightForestColors
@@ -126,6 +128,7 @@ fun ThemesScreen(
 
                     val themes = listOf(
                         Triple("SLATE", "Slate (Default)", "Classic Windows Fluent styling"),
+                        Triple("MIST", "Mist", "Clean white and blue-gray surfaces"),
                         Triple("OCEAN", "Ocean (Midnight Blue)", "Deep ocean blue tones"),
                         Triple("FOREST", "Forest (Emerald Green)", "Soothing green accents"),
                         Triple("SUNSET", "Sunset (Warm Amber)", "Radiant orange and gold hues"),
@@ -141,6 +144,7 @@ fun ThemesScreen(
                             
                             // Determine preview colors
                             val previewLight = when (themeItem.first) {
+                                "MIST" -> LightMistColors
                                 "OCEAN" -> LightOceanColors
                                 "FOREST" -> LightForestColors
                                 "SUNSET" -> LightSunsetColors
@@ -149,6 +153,7 @@ fun ThemesScreen(
                                 else -> LightFluentColors
                             }
                             val previewDark = when (themeItem.first) {
+                                "MIST" -> DarkMistColors
                                 "OCEAN" -> DarkOceanColors
                                 "FOREST" -> DarkForestColors
                                 "SUNSET" -> DarkSunsetColors

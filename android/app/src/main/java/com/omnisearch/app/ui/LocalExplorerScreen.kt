@@ -34,8 +34,10 @@ import androidx.compose.foundation.gestures.calculateCentroidSize
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
@@ -51,6 +53,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -62,6 +68,7 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -81,6 +88,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
+import coil.compose.SubcomposeAsyncImageContent
+import coil.imageLoader
 import com.omnisearch.app.data.LocalTrashManager
 import com.omnisearch.app.ui.theme.FluentTheme
 import java.io.*
@@ -89,6 +99,7 @@ import java.util.*
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withPermit
@@ -101,7 +112,8 @@ enum class ExplorerView {
         DIRECTORY,
         TRASH,
         FAVORITES,
-        CATEGORY
+        CATEGORY,
+	STORAGE_ANALYSIS
 }
 
 data class StorageInfo(
@@ -327,7 +339,69 @@ fun LocalExplorerScreen(
         var categoryFilesList by remember { mutableStateOf<List<File>>(emptyList()) }
         var isLoading by remember { mutableStateOf(false) }
 
-        var storagesList by remember { mutableStateOf<List<StorageInfo>>(emptyList()) }
+        val initialStorages = remember {
+                val list = mutableListOf<StorageInfo>()
+                val primaryDir = Environment.getExternalStorageDirectory()
+                val primaryInitial =
+                        try {
+                                val stats = StatFs(primaryDir.path)
+                                val total = stats.blockCountLong * stats.blockSizeLong
+                                val free = stats.availableBlocksLong * stats.blockSizeLong
+                                total to (total - free).coerceAtLeast(0L)
+                        } catch (_: Exception) {
+                                0L to 0L
+                        }
+                list.add(
+                        StorageInfo(
+                                name = "Internal storage",
+                                path = primaryDir.absolutePath,
+                                totalBytes = primaryInitial.first,
+                                usedBytes = primaryInitial.second,
+                                isSdCard = false
+                        )
+                )
+                try {
+                        val dirs = ContextCompat.getExternalFilesDirs(context, null)
+                        for (i in 1 until dirs.size) {
+                                val dir = dirs[i] ?: continue
+                                if (Environment.isExternalStorageRemovable(dir) ||
+                                                dir.absolutePath.contains("emulated").not()
+                                ) {
+                                        val path = dir.absolutePath
+                                        val storageRoot = if (path.contains("/Android/data")) {
+                                                path.substringBefore("/Android/data")
+                                        } else {
+                                                path
+                                        }
+                                        val storageInitial =
+                                                try {
+                                                        val stats = StatFs(storageRoot)
+                                                        val total =
+                                                                stats.blockCountLong *
+                                                                        stats.blockSizeLong
+                                                        val free =
+                                                                stats.availableBlocksLong *
+                                                                        stats.blockSizeLong
+                                                        total to (total - free).coerceAtLeast(0L)
+                                                } catch (_: Exception) {
+                                                        0L to 0L
+                                                }
+                                        list.add(
+                                                StorageInfo(
+                                                        name = "SD card",
+                                                        path = storageRoot,
+                                                        totalBytes = storageInitial.first,
+                                                        usedBytes = storageInitial.second,
+                                                        isSdCard = true
+                                                )
+                                        )
+                                }
+                        }
+                } catch (_: Exception) {}
+                list
+        }
+
+        var storagesList by remember { mutableStateOf<List<StorageInfo>>(initialStorages) }
         var showStorageAnalysisDialog by remember { mutableStateOf(false) }
 
         // Check permission inline helper function
@@ -366,10 +440,18 @@ fun LocalExplorerScreen(
                                 // 1. Internal Storage
                                 val primaryDir = Environment.getExternalStorageDirectory()
                                 try {
-                                        val stats = StatFs(primaryDir.path)
-                                        val total = stats.blockCountLong * stats.blockSizeLong
-                                        val free = stats.availableBlocksLong * stats.blockSizeLong
-                                        val used = total - free
+                                        var total = 0L
+                                        var free = 0L
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                val storageStatsManager = context.getSystemService(Context.STORAGE_STATS_SERVICE) as android.app.usage.StorageStatsManager
+                                                total = storageStatsManager.getTotalBytes(android.os.storage.StorageManager.UUID_DEFAULT)
+                                                free = storageStatsManager.getFreeBytes(android.os.storage.StorageManager.UUID_DEFAULT)
+                                        } else {
+                                                val stats = StatFs(primaryDir.path)
+                                                total = stats.blockCountLong * stats.blockSizeLong
+                                                free = stats.availableBlocksLong * stats.blockSizeLong
+                                        }
+                                        val used = (total - free).coerceAtLeast(0L)
                                         list.add(
                                                 StorageInfo(
                                                         "Internal storage",
@@ -379,7 +461,23 @@ fun LocalExplorerScreen(
                                                         false
                                                 )
                                         )
-                                } catch (_: Exception) {}
+                                } catch (e: Exception) {
+                                        try {
+                                                val stats = StatFs(primaryDir.path)
+                                                val total = stats.blockCountLong * stats.blockSizeLong
+                                                val free = stats.availableBlocksLong * stats.blockSizeLong
+                                                val used = (total - free).coerceAtLeast(0L)
+                                                list.add(
+                                                        StorageInfo(
+                                                                "Internal storage",
+                                                                primaryDir.absolutePath,
+                                                                total,
+                                                                used,
+                                                                false
+                                                        )
+                                                )
+                                        } catch (_: Exception) {}
+                                }
 
                                 // 2. SD Card(s)
                                 val dirs = ContextCompat.getExternalFilesDirs(context, null)
@@ -721,6 +819,9 @@ fun LocalExplorerScreen(
                                 }
                                 ExplorerView.CATEGORY -> {
                                         loadCategoryFiles()
+                                }
+                                ExplorerView.STORAGE_ANALYSIS -> {
+                                        // State loaded internally by the screen
                                 }
                         }
                 }
@@ -1381,9 +1482,33 @@ fun LocalExplorerScreen(
                                                                 },
                                                                 storages = storagesList,
                                                                 onAnalyseStorageClick = {
-                                                                        showStorageAnalysisDialog =
-                                                                                true
+                                                                        currentView = ExplorerView.STORAGE_ANALYSIS
                                                                 }
+                                                        )
+                                                }
+                                                ExplorerView.STORAGE_ANALYSIS -> {
+                                                        StorageAnalysisScreen(
+                                                                onBack = { currentView = ExplorerView.HOME },
+                                                                onNavigateToCategory = { name, exts ->
+                                                                        searchQuery = ""
+                                                                        selectedImageAlbum = null
+                                                                        categoryFilesList = emptyList()
+                                                                        currentCategoryName = name
+                                                                        currentCategoryExtensions = exts
+                                                                        currentView = ExplorerView.CATEGORY
+                                                                },
+                                                                onNavigateToTrash = {
+                                                                        searchQuery = ""
+                                                                        trashItems = emptyList()
+                                                                        currentView = ExplorerView.TRASH
+                                                                },
+                                                                onNavigateToDir = {
+                                                                        searchQuery = ""
+                                                                        directoryFiles = emptyList()
+                                                                        currentDirectory = it
+                                                                        currentView = ExplorerView.DIRECTORY
+                                                                },
+                                                                storages = storagesList
                                                         )
                                                 }
                                                 ExplorerView.DIRECTORY -> {
@@ -2046,7 +2171,9 @@ fun LocalExplorerScreen(
                                                                                         }
                                                                                         ?: sorted
                                                                 if (imageFiles.isEmpty()) {
-                                                                        if (!isLoading) {
+                                                                        if (isLoading) {
+                                                                                PlaceholderImageGrid()
+                                                                        } else {
                                                                                 Box(
                                                                                         modifier =
                                                                                                 Modifier.fillMaxSize(),
@@ -2097,6 +2224,13 @@ fun LocalExplorerScreen(
                                                                         // Image Gallery Grid
                                                                         val imagesGridState =
                                                                                 rememberLazyGridState()
+                                                                        var suppressedImageClickPath by
+                                                                                remember {
+                                                                                        mutableStateOf<
+                                                                                                String?>(
+                                                                                                null
+                                                                                        )
+                                                                                }
                                                                         Box(
                                                                                 modifier =
                                                                                         Modifier.fillMaxSize()
@@ -2125,6 +2259,22 @@ fun LocalExplorerScreen(
                                                                                                         ),
                                                                                         modifier =
                                                                                                 Modifier.fillMaxSize()
+                                                                                                        .mediaGridDragSelection(
+                                                                                                                files =
+                                                                                                                        imageFiles,
+                                                                                                                gridState =
+                                                                                                                        imagesGridState,
+                                                                                                                selectedFiles =
+                                                                                                                        selectedFiles,
+                                                                                                                onLongPressedItem = {
+                                                                                                                        suppressedImageClickPath =
+                                                                                                                                it.absolutePath
+                                                                                                                },
+                                                                                                                onSelectionModeChange = {
+                                                                                                                        isMultiSelectMode =
+                                                                                                                                it
+                                                                                                                }
+                                                                                                        )
                                                                                 ) {
                                                                                         itemsIndexed(
                                                                                                 imageFiles,
@@ -2181,7 +2331,14 @@ fun LocalExplorerScreen(
                                                                                                                         )
                                                                                                                         .combinedClickable(
                                                                                                                                 onClick = {
-                                                                                                                                        if (isMultiSelectMode
+                                                                                                                                        val shouldSuppressClick =
+                                                                                                                                                suppressedImageClickPath ==
+                                                                                                                                                        file.absolutePath
+                                                                                                                                        if (shouldSuppressClick
+                                                                                                                                        ) {
+                                                                                                                                                suppressedImageClickPath =
+                                                                                                                                                        null
+                                                                                                                                        } else if (isMultiSelectMode
                                                                                                                                         ) {
                                                                                                                                                 if (selectedFiles
                                                                                                                                                                 .contains(
@@ -2210,22 +2367,20 @@ fun LocalExplorerScreen(
                                                                                                                                                         index
                                                                                                                                         }
                                                                                                                                 },
-                                                                                                                                onLongClick = {
-                                                                                                                                        if (!isMultiSelectMode
-                                                                                                                                        ) {
-                                                                                                                                                isMultiSelectMode =
-                                                                                                                                                        true
-                                                                                                                                                selectedFiles
-                                                                                                                                                        .add(
-                                                                                                                                                                file
-                                                                                                                                                        )
-                                                                                                                                        }
-                                                                                                                                }
+                                                                                                                                onLongClick =
+                                                                                                                                        null
                                                                                                                         )
                                                                                                 ) {
-                                                                                                        AsyncImage(
+                                                                                                        SubcomposeAsyncImage(
                                                                                                                 model =
-                                                                                                                        file,
+                                                                                                                        coil.request.ImageRequest
+                                                                                                                                .Builder(
+                                                                                                                                        LocalContext
+                                                                                                                                                .current
+                                                                                                                                )
+                                                                                                                                .data(file)
+                                                                                                                                .crossfade(false)
+                                                                                                                                .build(),
                                                                                                                 contentDescription =
                                                                                                                         file.name,
                                                                                                                 contentScale =
@@ -2233,6 +2388,48 @@ fun LocalExplorerScreen(
                                                                                                                                 .Crop,
                                                                                                                 modifier =
                                                                                                                         Modifier.fillMaxSize()
+                                                                                                                                .background(
+                                                                                                                                        Color(
+                                                                                                                                                0xFF151515
+                                                                                                                                        )
+                                                                                                                                ),
+                                                                                                                loading = {
+                                                                                                                        Box(
+                                                                                                                                modifier =
+                                                                                                                                        Modifier.fillMaxSize()
+                                                                                                                                                .background(
+                                                                                                                                                        shimmerBrush()
+                                                                                                                                                )
+                                                                                                                        )
+                                                                                                                },
+                                                                                                                error = {
+                                                                                                                        Box(
+                                                                                                                                modifier =
+                                                                                                                                        Modifier.fillMaxSize()
+                                                                                                                                                .background(
+                                                                                                                                                        FluentTheme
+                                                                                                                                                                .colors
+                                                                                                                                                                .panelBorder
+                                                                                                                                                ),
+                                                                                                                                contentAlignment =
+                                                                                                                                        Alignment
+                                                                                                                                                .Center
+                                                                                                                        ) {
+                                                                                                                                Icon(
+                                                                                                                                        Icons.Default
+                                                                                                                                                .BrokenImage,
+                                                                                                                                        contentDescription =
+                                                                                                                                                null,
+                                                                                                                                        tint =
+                                                                                                                                                FluentTheme
+                                                                                                                                                        .colors
+                                                                                                                                                        .textMuted
+                                                                                                                                )
+                                                                                                                        }
+                                                                                                                },
+                                                                                                                success = {
+                                                                                                                        SubcomposeAsyncImageContent()
+                                                                                                                }
                                                                                                         )
                                                                                                         if (isMultiSelectMode
                                                                                                         ) {
@@ -2294,12 +2491,14 @@ fun LocalExplorerScreen(
                                                                         }
                                                                 }
                                                                 }
-                                                        } else if (currentCategoryName ==
+                                                         } else if (currentCategoryName ==
                                                                         "Videos" && useVideoGrid
                                                         ) {
                                                                 // Video Thumbnail Grid View
                                                                 if (sorted.isEmpty()) {
-                                                                        if (!isLoading) {
+                                                                        if (isLoading) {
+                                                                                PlaceholderImageGrid()
+                                                                        } else {
                                                                                 Box(
                                                                                         modifier =
                                                                                                 Modifier.fillMaxSize(),
@@ -2311,6 +2510,13 @@ fun LocalExplorerScreen(
                                                                 } else {
                                                                         val videosGridState =
                                                                                 rememberLazyGridState()
+                                                                        var suppressedVideoClickPath by
+                                                                                remember {
+                                                                                        mutableStateOf<
+                                                                                                String?>(
+                                                                                                null
+                                                                                        )
+                                                                                }
                                                                         Box(
                                                                                 modifier =
                                                                                         Modifier.fillMaxSize()
@@ -2339,6 +2545,22 @@ fun LocalExplorerScreen(
                                                                                                         ),
                                                                                         modifier =
                                                                                                 Modifier.fillMaxSize()
+                                                                                                        .mediaGridDragSelection(
+                                                                                                                files =
+                                                                                                                        sorted,
+                                                                                                                gridState =
+                                                                                                                        videosGridState,
+                                                                                                                selectedFiles =
+                                                                                                                        selectedFiles,
+                                                                                                                onLongPressedItem = {
+                                                                                                                        suppressedVideoClickPath =
+                                                                                                                                it.absolutePath
+                                                                                                                },
+                                                                                                                onSelectionModeChange = {
+                                                                                                                        isMultiSelectMode =
+                                                                                                                                it
+                                                                                                                }
+                                                                                                        )
                                                                                 ) {
                                                                                         itemsIndexed(
                                                                                                 sorted,
@@ -2394,7 +2616,14 @@ fun LocalExplorerScreen(
                                                                                                                         )
                                                                                                                         .combinedClickable(
                                                                                                                                 onClick = {
-                                                                                                                                        if (isMultiSelectMode
+                                                                                                                                        val shouldSuppressClick =
+                                                                                                                                                suppressedVideoClickPath ==
+                                                                                                                                                        file.absolutePath
+                                                                                                                                        if (shouldSuppressClick
+                                                                                                                                        ) {
+                                                                                                                                                suppressedVideoClickPath =
+                                                                                                                                                        null
+                                                                                                                                        } else if (isMultiSelectMode
                                                                                                                                         ) {
                                                                                                                                                 if (selectedFiles
                                                                                                                                                                 .contains(
@@ -2421,17 +2650,8 @@ fun LocalExplorerScreen(
                                                                                                                                                         file
                                                                                                                                         }
                                                                                                                                 },
-                                                                                                                                onLongClick = {
-                                                                                                                                        if (!isMultiSelectMode
-                                                                                                                                        ) {
-                                                                                                                                                isMultiSelectMode =
-                                                                                                                                                        true
-                                                                                                                                                selectedFiles
-                                                                                                                                                        .add(
-                                                                                                                                                                file
-                                                                                                                                                        )
-                                                                                                                                        }
-                                                                                                                                }
+                                                                                                                                onLongClick =
+                                                                                                                                        null
                                                                                                                         )
                                                                                                 ) {
                                                                                                         // Load video thumbnail asynchronously with
@@ -2506,17 +2726,21 @@ fun LocalExplorerScreen(
                                                                                                         } else if (thumbLoaded
                                                                                                         ) {
                                                                                                                 // ThumbnailUtils failed, fall back to Coil
-                                                                                                                AsyncImage(
-                                                                                                                        model =
-                                                                                                                                file,
-                                                                                                                        contentDescription =
-                                                                                                                                file.name,
-                                                                                                                        contentScale =
-                                                                                                                                ContentScale
-                                                                                                                                        .Crop,
-                                                                                                                        modifier =
-                                                                                                                                Modifier.fillMaxSize()
-                                                                                                                )
+                                                                                                                Box(
+                                                                                                                        modifier = Modifier
+                                                                                                                                .fillMaxSize()
+                                                                                                                                .background(shimmerBrush())
+                                                                                                                ) {
+                                                                                                                        AsyncImage(
+                                                                                                                                model = coil.request.ImageRequest.Builder(LocalContext.current)
+                                                                                                                                        .data(file)
+                                                                                                                                        .crossfade(true)
+                                                                                                                                        .build(),
+                                                                                                                                contentDescription = file.name,
+                                                                                                                                contentScale = ContentScale.Crop,
+                                                                                                                                modifier = Modifier.fillMaxSize()
+                                                                                                                        )
+                                                                                                                }
                                                                                                         } else {
                                                                                                                 // Loading placeholder
                                                                                                                 Box(
@@ -3849,10 +4073,35 @@ fun ExplorerHeader(
         onSendToDesktop: () -> Unit = {},
         hasSelectedFiles: Boolean = false
 ) {
+        val canSearch =
+                currentView == ExplorerView.DIRECTORY ||
+                        currentView == ExplorerView.CATEGORY ||
+                        currentView == ExplorerView.FAVORITES
+        var isSearchActive by remember { mutableStateOf(false) }
+        val showSearch = canSearch && (isSearchActive || searchQuery.isNotEmpty())
+        val searchFocusRequester = remember { FocusRequester() }
+        val keyboardController = LocalSoftwareKeyboardController.current
+
+        fun closeSearch() {
+                isSearchActive = false
+                if (searchQuery.isNotEmpty()) onSearchQueryChange("")
+                keyboardController?.hide()
+        }
+
+        BackHandler(enabled = showSearch) { closeSearch() }
+
+        LaunchedEffect(canSearch, showSearch) {
+                if (!canSearch) {
+                        isSearchActive = false
+                } else if (showSearch) {
+                        searchFocusRequester.requestFocus()
+                        keyboardController?.show()
+                }
+        }
+
         Surface(color = FluentTheme.colors.pageBg) {
                 Column(
-                        modifier =
-                                Modifier.fillMaxWidth().statusBarsPadding().padding(bottom = 8.dp)
+                        modifier = Modifier.fillMaxWidth().statusBarsPadding()
                 ) {
                         // First Top Row
                         Row(
@@ -3861,71 +4110,252 @@ fun ExplorerHeader(
                                                 .padding(horizontal = 16.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                         ) {
-                                IconButton(onClick = onBack) {
+                                IconButton(onClick = { if (showSearch) closeSearch() else onBack() }) {
                                         Icon(
                                                 Icons.Default.ArrowBack,
-                                                contentDescription = "Back",
+                                                contentDescription =
+                                                        if (showSearch) "Close search" else "Back",
                                                 tint = FluentTheme.colors.textColor
                                         )
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                        val title =
-                                                when (currentView) {
-                                                        ExplorerView.HOME -> "My Files Hub"
-                                                        ExplorerView.DIRECTORY -> "Internal Storage"
-                                                        ExplorerView.TRASH -> "Recycle Bin"
-                                                        ExplorerView.FAVORITES -> "Favorites"
-                                                        ExplorerView.CATEGORY -> currentCategoryName
+                                Crossfade(
+                                        targetState = showSearch,
+                                        animationSpec = tween(durationMillis = 180),
+                                        label = "ExplorerHeaderSearchMode",
+                                        modifier = Modifier.weight(1f)
+                                ) { searching ->
+                                        if (searching) {
+                                                Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                        Box(
+                                                                modifier =
+                                                                        Modifier.fillMaxWidth()
+                                                                                .heightIn(
+                                                                                        min = 44.dp
+                                                                                )
+                                                                                .clip(
+                                                                                        CircleShape
+                                                                                )
+                                                                                .background(
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .panelBg
+                                                                                )
+                                                                                .border(
+                                                                                        1.dp,
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .accent
+                                                                                                .copy(
+                                                                                                        alpha =
+                                                                                                                0.36f
+                                                                                                ),
+                                                                                        CircleShape
+                                                                                )
+                                                                                .padding(
+                                                                                        horizontal =
+                                                                                                14.dp,
+                                                                                        vertical =
+                                                                                                10.dp
+                                                                                )
+                                                        ) {
+                                                                Row(
+                                                                        verticalAlignment =
+                                                                                Alignment
+                                                                                        .CenterVertically,
+                                                                        modifier =
+                                                                                Modifier
+                                                                                        .fillMaxWidth()
+                                                                ) {
+                                                                        Icon(
+                                                                                Icons.Default
+                                                                                        .Search,
+                                                                                contentDescription =
+                                                                                        null,
+                                                                                tint =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .accent,
+                                                                                modifier =
+                                                                                        Modifier
+                                                                                                .size(
+                                                                                                        18.dp
+                                                                                                )
+                                                                        )
+                                                                        Spacer(
+                                                                                modifier =
+                                                                                        Modifier
+                                                                                                .width(
+                                                                                                        8.dp
+                                                                                                )
+                                                                        )
+                                                                        ExplorerBasicTextField(
+                                                                                value = searchQuery,
+                                                                                onValueChange =
+                                                                                        onSearchQueryChange,
+                                                                                placeholder =
+                                                                                        "Search current view",
+                                                                                modifier =
+                                                                                        Modifier
+                                                                                                .weight(
+                                                                                                        1f
+                                                                                                )
+                                                                                                .focusRequester(
+                                                                                                        searchFocusRequester
+                                                                                                )
+                                                                        )
+                                                                        if (searchQuery.isNotEmpty()) {
+                                                                                Icon(
+                                                                                        imageVector =
+                                                                                                Icons
+                                                                                                        .Default
+                                                                                                        .Clear,
+                                                                                        contentDescription =
+                                                                                                "Clear",
+                                                                                        tint =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .textMuted,
+                                                                                        modifier =
+                                                                                                Modifier
+                                                                                                        .size(
+                                                                                                                18.dp
+                                                                                                        )
+                                                                                                        .clickable {
+                                                                                                                onSearchQueryChange(
+                                                                                                                        ""
+                                                                                                                )
+                                                                                                        }
+                                                                                )
+                                                                        }
+                                                                }
+                                                        }
                                                 }
-                                        Text(
-                                                text = title,
-                                                fontSize = 18.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = FluentTheme.colors.textColor
-                                        )
-                                        if (currentView == ExplorerView.DIRECTORY) {
-                                                Text(
-                                                        text = currentDirectory.name,
-                                                        fontSize = 12.sp,
-                                                        color = FluentTheme.colors.textMuted,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                )
-                                        }
-                                }
+                                        } else {
+                                                Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                                val title =
+                                                                        when (currentView) {
+                                                                                ExplorerView.HOME ->
+                                                                                        "My Files Hub"
+                                                                                ExplorerView
+                                                                                        .DIRECTORY ->
+                                                                                        "Internal Storage"
+                                                                                ExplorerView.TRASH ->
+                                                                                        "Recycle Bin"
+                                                                                ExplorerView
+                                                                                        .FAVORITES ->
+                                                                                        "Favorites"
+                                                                                ExplorerView
+                                                                                        .CATEGORY ->
+                                                                                        currentCategoryName
+													ExplorerView.STORAGE_ANALYSIS ->
+														"Analyse storage"
+                                                                        }
+                                                                Text(
+                                                                        text = title,
+                                                                        fontSize = 18.sp,
+                                                                        fontWeight =
+                                                                                FontWeight.Bold,
+                                                                        color =
+                                                                                FluentTheme.colors
+                                                                                        .textColor
+                                                                )
+                                                                if (currentView ==
+                                                                                ExplorerView
+                                                                                        .DIRECTORY
+                                                                ) {
+                                                                        Text(
+                                                                                text =
+                                                                                        currentDirectory
+                                                                                                .name,
+                                                                                fontSize = 12.sp,
+                                                                                color =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .textMuted,
+                                                                                maxLines = 1,
+                                                                                overflow =
+                                                                                        TextOverflow
+                                                                                                .Ellipsis
+                                                                        )
+                                                                }
+                                                        }
 
-                                // Header Action Options
-                                if (currentView == ExplorerView.DIRECTORY) {
-                                        IconButton(onClick = onCreateFolder) {
-                                                Icon(
-                                                        Icons.Default.CreateNewFolder,
-                                                        contentDescription = "New Folder",
-                                                        tint = FluentTheme.colors.textColor
-                                                )
-                                        }
-                                }
+                                                        // Header Action Options
+                                                        if (currentView == ExplorerView.DIRECTORY) {
+                                                                IconButton(onClick = onCreateFolder) {
+                                                                        Icon(
+                                                                                Icons.Default
+                                                                                        .CreateNewFolder,
+                                                                                contentDescription =
+                                                                                        "New Folder",
+                                                                                tint =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .textColor
+                                                                        )
+                                                                }
+                                                        }
 
-                                if (currentView == ExplorerView.HOME) {
-                                        IconButton(onClick = onThemesClick) {
-                                                Icon(
-                                                        Icons.Default.Palette,
-                                                        contentDescription = "Themes",
-                                                        tint = FluentTheme.colors.textColor
-                                                )
-                                        }
-                                }
+                                                        if (currentView == ExplorerView.HOME) {
+                                                                IconButton(onClick = onThemesClick) {
+                                                                        Icon(
+                                                                                Icons.Default.Palette,
+                                                                                contentDescription =
+                                                                                        "Themes",
+                                                                                tint =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .textColor
+                                                                        )
+                                                                }
+                                                        }
 
-                                // Sorting & Options Menu
-                                var showMenu by remember { mutableStateOf(false) }
-                                Box {
-                                        IconButton(onClick = { showMenu = true }) {
-                                                Icon(
-                                                        Icons.Default.MoreVert,
-                                                        contentDescription = "Options",
-                                                        tint = FluentTheme.colors.textColor
-                                                )
-                                        }
+                                                        if (canSearch) {
+                                                                IconButton(
+                                                                        onClick = {
+                                                                                isSearchActive =
+                                                                                        true
+                                                                        }
+                                                                ) {
+                                                                        Icon(
+                                                                                Icons.Default.Search,
+                                                                                contentDescription =
+                                                                                        "Search",
+                                                                                tint =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .textColor
+                                                                        )
+                                                                }
+                                                        }
+
+                                                        // Sorting & Options Menu
+                                                        var showMenu by remember {
+                                                                mutableStateOf(false)
+                                                        }
+                                                        Box {
+                                                                IconButton(
+                                                                        onClick = { showMenu = true }
+                                                                ) {
+                                                                        Icon(
+                                                                                Icons.Default
+                                                                                        .MoreVert,
+                                                                                contentDescription =
+                                                                                        "Options",
+                                                                                tint =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .textColor
+                                                                        )
+                                                                }
                                         DropdownMenu(
                                                 expanded = showMenu,
                                                 onDismissRequest = { showMenu = false },
@@ -4285,78 +4715,705 @@ fun ExplorerHeader(
                                                 )
                                         }
                                 }
+                                                }
+                                        }
+                                }
                         }
+                }
+        }
+}
 
-                        // Search Bar Row (If browsing directory or categories)
-                        if (currentView == ExplorerView.DIRECTORY ||
-                                        currentView == ExplorerView.CATEGORY ||
-                                        currentView == ExplorerView.FAVORITES
-                        ) {
-                                Box(
-                                        modifier =
-                                                Modifier.fillMaxWidth()
-                                                        .padding(horizontal = 16.dp)
-                                                        .clip(
-                                                                RoundedCornerShape(
-                                                                        FluentTheme.dims
-                                                                                .controlRadius
-                                                                )
-                                                        )
-                                                        .background(FluentTheme.colors.surfaceBg)
-                                                        .border(
-                                                                1.dp,
-                                                                FluentTheme.colors.panelBorder,
-                                                                RoundedCornerShape(
-                                                                        FluentTheme.dims
-                                                                                .controlRadius
-                                                                )
-                                                        )
-                                                        .padding(
-                                                                horizontal = 12.dp,
-                                                                vertical = 6.dp
-                                                        )
-                                ) {
-                                        Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                modifier = Modifier.fillMaxWidth()
+
+fun Modifier.gradientContent(colors: List<Color>): Modifier = this
+    .graphicsLayer(alpha = 0.99f)
+    .drawWithCache {
+        val brush = Brush.linearGradient(colors)
+        onDrawWithContent {
+            drawContent()
+            drawRect(brush, blendMode = BlendMode.SrcAtop)
+        }
+    }
+
+data class CategoryItem(
+    val name: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val colors: List<Color>,
+    val extensions: List<String>
+)
+
+data class StorageCategoryStats(
+    val name: String,
+    val size: Long,
+    val color: Color,
+    val extensions: List<String> = emptyList(),
+    val onClick: (() -> Unit)? = null
+)
+
+private fun queryCategorySize(context: Context, uri: Uri, selection: String?, selectionArgs: Array<String>?): Long {
+    var size = 0L
+    try {
+        val projection = arrayOf(MediaStore.MediaColumns.SIZE)
+        context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+            val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+            if (sizeIdx != -1) {
+                while (cursor.moveToNext()) {
+                    size += cursor.getLong(sizeIdx)
+                }
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("StorageAnalysis", "Error querying category size", e)
+    }
+    return size
+}
+
+private fun queryFilesSizeByExtension(context: Context, extensions: List<String>): Long {
+    if (extensions.isEmpty()) return 0L
+    var size = 0L
+    try {
+        val uri = MediaStore.Files.getContentUri("external")
+        val projection = arrayOf(MediaStore.Files.FileColumns.SIZE)
+        
+        val selection = StringBuilder()
+        val args = mutableListOf<String>()
+        extensions.forEachIndexed { index, ext ->
+            selection.append(MediaStore.Files.FileColumns.DATA).append(" LIKE ?")
+            if (index < extensions.size - 1) {
+                selection.append(" OR ")
+            }
+            args.add("%.$ext")
+        }
+        
+        context.contentResolver.query(
+            uri,
+            projection,
+            selection.toString(),
+            args.toTypedArray(),
+            null
+        )?.use { cursor ->
+            val sizeIdx = cursor.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
+            if (sizeIdx != -1) {
+                while (cursor.moveToNext()) {
+                    size += cursor.getLong(sizeIdx)
+                }
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("StorageAnalysis", "Error querying files size by extension", e)
+    }
+    return size
+}
+
+private fun calculateAppsSizeFromPackageManager(context: Context): Long {
+    var size = 0L
+    try {
+        val pm = context.packageManager
+        val apps = pm.getInstalledApplications(0)
+        for (app in apps) {
+            val file = File(app.sourceDir)
+            if (file.exists()) {
+                size += file.length()
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("StorageAnalysis", "Error querying package manager sizes", e)
+    }
+    return size
+}
+
+@Composable
+fun CategoryItemCardless(
+        item: CategoryItem,
+        onNavigateToCategory: (String, List<String>) -> Unit,
+        onNavigateToDir: (File) -> Unit
+) {
+        Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable {
+                                if (item.name == "Downloads") {
+                                        onNavigateToDir(
+                                                Environment.getExternalStoragePublicDirectory(
+                                                        Environment.DIRECTORY_DOWNLOADS
+                                                )
+                                        )
+                                } else {
+                                        onNavigateToCategory(item.name, item.extensions)
+                                }
+                        }
+                        .padding(vertical = 12.dp, horizontal = 4.dp)
+        ) {
+                Icon(
+                        imageVector = item.icon,
+                        contentDescription = item.name,
+                        modifier = Modifier
+                                .size(36.dp)
+                                .gradientContent(item.colors)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                        text = item.name,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = FluentTheme.colors.textColor,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                )
+        }
+}
+
+@Composable
+fun StorageItemCardless(
+        storage: StorageInfo,
+        onNavigateToDir: (File) -> Unit
+) {
+        val usedPercent = if (storage.totalBytes > 0) {
+                (storage.usedBytes.toFloat() / storage.totalBytes.toFloat() * 100f).toInt()
+        } else {
+                0
+        }
+        val gradientColors = if (storage.isSdCard) {
+                listOf(Color(0xFFB57EDC), Color(0xFF7C4DFF))
+        } else {
+                listOf(Color(0xFF29B6F6), Color(0xFF0288D1))
+        }
+
+        // Animate the percentage from 0 to actual value
+        var percentAnim by remember { mutableStateOf(0f) }
+        val animatedPercent by animateFloatAsState(
+                targetValue = percentAnim,
+                animationSpec = tween(durationMillis = 1000, easing = FastOutSlowInEasing),
+                label = "storageItemPercent"
+        )
+        LaunchedEffect(usedPercent) {
+                percentAnim = 0f
+                delay(80)
+                percentAnim = usedPercent.toFloat()
+        }
+        
+        Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onNavigateToDir(File(storage.path)) }
+                        .padding(vertical = 12.dp, horizontal = 4.dp)
+        ) {
+                Icon(
+                        imageVector = if (storage.isSdCard) Icons.Default.SdCard else Icons.Default.Storage,
+                        contentDescription = storage.name,
+                        modifier = Modifier
+                                .size(36.dp)
+                                .gradientContent(gradientColors)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                        text = storage.name,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = FluentTheme.colors.textColor,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                        text = "${animatedPercent.toInt()}% used",
+                        fontSize = 11.sp,
+                        color = FluentTheme.colors.textMuted,
+                        textAlign = TextAlign.Center
+                )
+        }
+}
+
+private fun hasUsageStatsPermission(context: Context): Boolean {
+        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(
+                        android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                        android.os.Process.myUid(),
+                        context.packageName
+                )
+        } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                        android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                        android.os.Process.myUid(),
+                        context.packageName
+                )
+        }
+        return mode == android.app.AppOpsManager.MODE_ALLOWED
+}
+
+@Composable
+fun StorageAnalysisScreen(
+        onBack: () -> Unit,
+        onNavigateToCategory: (String, List<String>) -> Unit,
+        onNavigateToTrash: () -> Unit,
+        onNavigateToDir: (File) -> Unit,
+        storages: List<StorageInfo>
+) {
+        val context = LocalContext.current
+        var selectedStorageIndex by remember { mutableIntStateOf(0) }
+        val currentStorage = storages.getOrNull(selectedStorageIndex)
+        
+        var isLoading by remember { mutableStateOf(true) }
+        var analysisTimeMs by remember { mutableLongStateOf(0L) }
+        var statsList by remember { mutableStateOf<List<StorageCategoryStats>>(emptyList()) }
+        
+        // Initialize sizes immediately from currentStorage so the card isn't blank at first
+        var totalSize by remember(currentStorage) { 
+                mutableLongStateOf(currentStorage?.totalBytes ?: 0L) 
+        }
+        var freeSize by remember(currentStorage) { 
+                mutableLongStateOf(
+                        if (currentStorage != null) (currentStorage.totalBytes - currentStorage.usedBytes).coerceAtLeast(0L) else 0L
+                ) 
+        }
+
+        // Animation States
+        var overallProgressAnim by remember(currentStorage) { mutableStateOf(0f) }
+        val overallProgress by animateFloatAsState(
+                targetValue = overallProgressAnim,
+                animationSpec = tween(durationMillis = 1000, easing = FastOutSlowInEasing),
+                label = "overallProgressAnimation"
+        )
+
+        var detailsProgressAnim by remember(currentStorage) { mutableStateOf(0f) }
+        val detailsProgress by animateFloatAsState(
+                targetValue = detailsProgressAnim,
+                animationSpec = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+                label = "detailsProgressAnimation"
+        )
+
+        // Trigger overall animation immediately
+        LaunchedEffect(currentStorage) {
+                overallProgressAnim = 0f
+                delay(50)
+                overallProgressAnim = 1f
+        }
+
+        // Trigger details animation when loading finishes
+        LaunchedEffect(isLoading) {
+                if (!isLoading) {
+                        detailsProgressAnim = 0f
+                        delay(50)
+                        detailsProgressAnim = 1f
+                }
+        }
+
+        val lifecycleOwner = LocalLifecycleOwner.current
+        var hasPermission by remember { mutableStateOf(hasUsageStatsPermission(context)) }
+
+        DisposableEffect(lifecycleOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_RESUME) {
+                                hasPermission = hasUsageStatsPermission(context)
+                        }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
+                }
+        }
+
+        LaunchedEffect(selectedStorageIndex, currentStorage, hasPermission) {
+                if (currentStorage == null) return@LaunchedEffect
+                isLoading = true
+                
+                withContext(Dispatchers.IO) {
+                        val startTime = System.currentTimeMillis()
+                        
+                        val path = File(currentStorage.path)
+                        val stat = StatFs(path.path)
+                        val blockSize = stat.blockSizeLong
+                        val dataPartitionTotal = stat.blockCountLong * blockSize
+                        val dataPartitionFree = stat.availableBlocksLong * blockSize
+                        val dataPartitionUsed = (dataPartitionTotal - dataPartitionFree).coerceAtLeast(0L)
+                        
+                        var total = dataPartitionTotal
+                        var free = dataPartitionFree
+                        
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !currentStorage.isSdCard) {
+                                try {
+                                        val storageStatsManager = context.getSystemService(Context.STORAGE_STATS_SERVICE) as android.app.usage.StorageStatsManager
+                                        total = storageStatsManager.getTotalBytes(android.os.storage.StorageManager.UUID_DEFAULT)
+                                        free = storageStatsManager.getFreeBytes(android.os.storage.StorageManager.UUID_DEFAULT)
+                                } catch (_: Exception) {}
+                        }
+                        val used = (total - free).coerceAtLeast(0L)
+                        
+                        val imagesSize = queryCategorySize(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, null, null)
+                        val videosSize = queryCategorySize(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, null, null)
+                        val audioSize = queryCategorySize(context, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, null, null)
+                        val docExts = listOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt")
+                        val docsSize = queryFilesSizeByExtension(context, docExts)
+                        
+                        val apksSize = queryFilesSizeByExtension(context, listOf("apk"))
+                        val compressedSize = queryFilesSizeByExtension(context, listOf("zip", "rar", "7z", "tar", "gz"))
+                        val trashSize = LocalTrashManager.getTrashItems(context).sumOf { it.size }
+                        
+                        val systemSize = if (currentStorage.isSdCard) {
+                                0L
+                        } else {
+                                val baseSystem = (total - dataPartitionTotal).coerceAtLeast(0L)
+                                if (baseSystem > 0) baseSystem else (total * 0.18f).toLong()
+                        }
+                        
+                        val categorizedMediaUsed = imagesSize + videosSize + audioSize + docsSize + apksSize + compressedSize + trashSize
+                        
+                        var appsSize = 0L
+                        var finalOtherSize = 0L
+                        
+                        if (!currentStorage.isSdCard) {
+                                if (hasPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                        try {
+                                                val storageStatsManager = context.getSystemService(Context.STORAGE_STATS_SERVICE) as android.app.usage.StorageStatsManager
+                                                val stats = storageStatsManager.queryStatsForUser(
+                                                        android.os.storage.StorageManager.UUID_DEFAULT,
+                                                        android.os.Process.myUserHandle()
+                                                )
+                                                appsSize = stats.appBytes + stats.dataBytes + stats.cacheBytes
+                                        } catch (e: Exception) {
+                                                val remainingDataUsed = (dataPartitionUsed - categorizedMediaUsed).coerceAtLeast(0L)
+                                                appsSize = (remainingDataUsed * 0.92f).toLong()
+                                        }
+                                } else {
+                                        val remainingDataUsed = (dataPartitionUsed - categorizedMediaUsed).coerceAtLeast(0L)
+                                        appsSize = (remainingDataUsed * 0.92f).toLong()
+                                }
+                                
+                                val rawOther = used - (categorizedMediaUsed + appsSize + systemSize)
+                                finalOtherSize = rawOther.coerceAtLeast(0L)
+                        } else {
+                                val rawOther = used - categorizedMediaUsed
+                                finalOtherSize = rawOther.coerceAtLeast(0L)
+                        }
+                        
+                        totalSize = total
+                        freeSize = free
+                        
+                        val items = mutableListOf<StorageCategoryStats>()
+                        items.add(StorageCategoryStats("Images", imagesSize, Color(0xFFF47C60), listOf("png", "jpg", "jpeg", "webp", "gif", "bmp")) {
+                                onNavigateToCategory("Images", listOf("png", "jpg", "jpeg", "webp", "gif", "bmp"))
+                        })
+                        items.add(StorageCategoryStats("Videos", videosSize, Color(0xFFB57EDC), listOf("mp4", "mkv", "webm", "avi", "3gp", "mov")) {
+                                onNavigateToCategory("Videos", listOf("mp4", "mkv", "webm", "avi", "3gp", "mov"))
+                        })
+                        items.add(StorageCategoryStats("Audio files", audioSize, Color(0xFF75A6FF), listOf("mp3", "wav", "m4a", "flac", "ogg", "aac")) {
+                                onNavigateToCategory("Audio files", listOf("mp3", "wav", "m4a", "flac", "ogg", "aac"))
+                        })
+                        items.add(StorageCategoryStats("Documents", docsSize, Color(0xFFE5B575), docExts) {
+                                onNavigateToCategory("Documents", docExts)
+                        })
+                        items.add(StorageCategoryStats("Installation files", apksSize, Color(0xFF9CCC65), listOf("apk")) {
+                                onNavigateToCategory("Installation files", listOf("apk"))
+                        })
+                        items.add(StorageCategoryStats("Compressed files", compressedSize, Color(0xFF4AC4CF), listOf("zip", "rar", "7z", "tar", "gz")) {
+                                onNavigateToCategory("Compressed files", listOf("zip", "rar", "7z", "tar", "gz"))
+                        })
+                        
+                        if (!currentStorage.isSdCard) {
+                                items.add(StorageCategoryStats("Apps", appsSize, Color(0xFF00796B)))
+                                items.add(StorageCategoryStats("System", systemSize, Color(0xFF607D8B)))
+                        }
+                        
+                        items.add(StorageCategoryStats("Other files", finalOtherSize, Color(0xFFB0BEC5)))
+                        items.add(StorageCategoryStats("Recycle bin", trashSize, Color(0xFF757575)) {
+                                onNavigateToTrash()
+                        })
+                        
+                        statsList = items.sortedByDescending { it.size }
+                        analysisTimeMs = System.currentTimeMillis() - startTime
+                        isLoading = false
+                }
+        }
+
+        Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = FluentTheme.colors.pageBg
+        ) {
+                val usedSpace = (totalSize - freeSize).coerceAtLeast(0L)
+                val overallUsedRatio = if (totalSize > 0) usedSpace.toFloat() / totalSize.toFloat() else 0f
+                
+                val displayUsedPercent = if (isLoading || detailsProgress < 0.01f) {
+                        (overallUsedRatio * overallProgress * 100).toInt()
+                } else {
+                        (overallUsedRatio * 100).toInt()
+                }
+                
+                val displayUsedSpace = if (isLoading || detailsProgress < 0.01f) {
+                        (usedSpace.toFloat() * overallProgress).toLong()
+                } else {
+                        usedSpace
+                }
+                
+                LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                        if (storages.size > 1) {
+                                item {
+                                        TabRow(
+                                                selectedTabIndex = selectedStorageIndex,
+                                                containerColor = Color.Transparent,
+                                                contentColor = FluentTheme.colors.accent,
+                                                divider = {}
                                         ) {
-                                                Icon(
-                                                        Icons.Default.Search,
-                                                        contentDescription = null,
-                                                        tint = FluentTheme.colors.textMuted,
-                                                        modifier = Modifier.size(18.dp)
-                                                )
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                ExplorerBasicTextField(
-                                                        value = searchQuery,
-                                                        onValueChange = onSearchQueryChange,
-                                                        placeholder = "Search in current view...",
-                                                        modifier = Modifier.weight(1f)
-                                                )
-                                                if (searchQuery.isNotEmpty()) {
-                                                        Icon(
-                                                                imageVector = Icons.Default.Clear,
-                                                                contentDescription = "Clear",
-                                                                tint = FluentTheme.colors.textMuted,
-                                                                modifier =
-                                                                        Modifier.size(18.dp)
-                                                                                .clickable {
-                                                                                        onSearchQueryChange(
-                                                                                                ""
-                                                                                        )
-                                                                                }
+                                                storages.forEachIndexed { index, storage ->
+                                                        Tab(
+                                                                selected = selectedStorageIndex == index,
+                                                                onClick = { selectedStorageIndex = index },
+                                                                text = {
+                                                                        Text(
+                                                                                text = storage.name,
+                                                                                fontWeight = FontWeight.Bold,
+                                                                                fontSize = 14.sp
+                                                                        )
+                                                                }
                                                         )
                                                 }
                                         }
                                 }
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Divider(color = FluentTheme.colors.panelBorder)
+
+                        item {
+                                Card(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = CardDefaults.cardColors(containerColor = FluentTheme.colors.surfaceBg),
+                                        border = BorderStroke(1.dp, FluentTheme.colors.panelBorder)
+                                ) {
+                                        Column(modifier = Modifier.padding(20.dp)) {
+                                                Text(
+                                                        text = if (currentStorage?.isSdCard == true) "SD Card" else "Internal Storage",
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        fontSize = 14.sp,
+                                                        color = FluentTheme.colors.textMuted
+                                                )
+                                                Spacer(modifier = Modifier.height(6.dp))
+                                                Text(
+                                                        text = "${displayUsedPercent}% used",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 28.sp,
+                                                        color = FluentTheme.colors.textColor
+                                                )
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(
+                                                        text = "${formatSize(displayUsedSpace)} / ${formatSize(totalSize)} used",
+                                                        fontSize = 13.sp,
+                                                        color = FluentTheme.colors.textMuted
+                                                )
+                                                Spacer(modifier = Modifier.height(20.dp))
+
+                                                Box(
+                                                        modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .height(16.dp)
+                                                                .clip(RoundedCornerShape(8.dp))
+                                                                .background(FluentTheme.colors.panelBorder)
+                                                ) {
+                                                        Row(modifier = Modifier.fillMaxSize()) {
+                                                                if (isLoading || detailsProgress < 0.01f) {
+                                                                        val weight = overallUsedRatio * overallProgress
+                                                                        if (weight > 0f) {
+                                                                                Box(
+                                                                                        modifier = Modifier
+                                                                                                .fillMaxHeight()
+                                                                                                .weight(weight.coerceAtLeast(0.0001f))
+                                                                                                .background(FluentTheme.colors.accent)
+                                                                                )
+                                                                        }
+                                                                } else {
+                                                                        statsList.filter { it.size > 0 }.forEach { stat ->
+                                                                                val weight = (stat.size.toFloat() / totalSize.toFloat()) * detailsProgress
+                                                                                Box(
+                                                                                        modifier = Modifier
+                                                                                                .fillMaxHeight()
+                                                                                                .weight(weight.coerceAtLeast(0.0001f))
+                                                                                                .background(stat.color)
+                                                                                )
+                                                                        }
+                                                                        val remainingWeight = overallUsedRatio * (1f - detailsProgress)
+                                                                        if (remainingWeight > 0.001f) {
+                                                                                Box(
+                                                                                        modifier = Modifier
+                                                                                                .fillMaxHeight()
+                                                                                                .weight(remainingWeight.coerceAtLeast(0.0001f))
+                                                                                                .background(FluentTheme.colors.accent)
+                                                                                )
+                                                                        }
+                                                                }
+
+                                                                val spacerWeight = if (isLoading || detailsProgress < 0.01f) {
+                                                                        1f - (overallUsedRatio * overallProgress)
+                                                                } else {
+                                                                        1f - overallUsedRatio
+                                                                }
+                                                                if (spacerWeight > 0f) {
+                                                                        Spacer(
+                                                                                modifier = Modifier
+                                                                                        .fillMaxHeight()
+                                                                                        .weight(spacerWeight.coerceAtLeast(0.0001f))
+                                                                        )
+                                                                }
+                                                        }
+                                                }
+                                        }
+                                }
+                        }
+
+                        if (!hasPermission && currentStorage?.isSdCard == false) {
+                                item {
+                                        Card(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = CardDefaults.cardColors(containerColor = FluentTheme.colors.surfaceBg),
+                                                border = BorderStroke(1.dp, FluentTheme.colors.panelBorder)
+                                        ) {
+                                                Row(
+                                                        modifier = Modifier.padding(16.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                                Text(
+                                                                        text = "Precise App Storage",
+                                                                        fontWeight = FontWeight.Bold,
+                                                                        fontSize = 14.sp,
+                                                                        color = FluentTheme.colors.textColor
+                                                                )
+                                                                Spacer(modifier = Modifier.height(2.dp))
+                                                                Text(
+                                                                        text = "Grant usage access to see exact app sizes.",
+                                                                        fontSize = 12.sp,
+                                                                        color = FluentTheme.colors.textMuted
+                                                                )
+                                                        }
+                                                        Button(
+                                                                onClick = {
+                                                                        try {
+                                                                                context.startActivity(
+                                                                                        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                                                                                                data = Uri.fromParts("package", context.packageName, null)
+                                                                                        }
+                                                                                )
+                                                                        } catch (e: Exception) {
+                                                                                try {
+                                                                                        context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                                                                                } catch (_: Exception) {}
+                                                                        }
+                                                                },
+                                                                colors = ButtonDefaults.buttonColors(
+                                                                        containerColor = FluentTheme.colors.accent
+                                                                ),
+                                                                shape = RoundedCornerShape(4.dp),
+                                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                                        ) {
+                                                                Text("Grant", fontSize = 12.sp, color = Color.White)
+                                                        }
+                                                }
+                                        }
+                                }
+                        }
+
+                        if (isLoading) {
+                                item {
+                                        Box(
+                                                modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(vertical = 40.dp),
+                                                contentAlignment = Alignment.Center
+                                        ) {
+                                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                        CircularProgressIndicator(
+                                                                color = FluentTheme.colors.accent,
+                                                                strokeWidth = 3.dp,
+                                                                modifier = Modifier.size(36.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.height(12.dp))
+                                                        Text(
+                                                                text = "Analyzing storage details...",
+                                                                color = FluentTheme.colors.textMuted,
+                                                                fontSize = 13.sp
+                                                        )
+                                                }
+                                        }
+                                }
+                        } else {
+                                items(statsList) { stat ->
+                                        Row(
+                                                modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clip(RoundedCornerShape(8.dp))
+                                                        .clickable {
+                                                                if (stat.onClick != null) {
+                                                                        stat.onClick.invoke()
+                                                                } else {
+                                                                        Toast.makeText(context, "${stat.name} cannot be browsed directly.", Toast.LENGTH_SHORT).show()
+                                                                }
+                                                        }
+                                                        .padding(vertical = 12.dp, horizontal = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                                Box(
+                                                        modifier = Modifier
+                                                                .size(12.dp)
+                                                                .clip(CircleShape)
+                                                                .background(stat.color)
+                                                )
+                                                Spacer(modifier = Modifier.width(14.dp))
+                                                Text(
+                                                        text = stat.name,
+                                                        fontWeight = FontWeight.Medium,
+                                                        fontSize = 14.sp,
+                                                        color = FluentTheme.colors.textColor
+                                                )
+                                                Spacer(modifier = Modifier.weight(1f))
+                                                Text(
+                                                        text = formatSize(stat.size),
+                                                        fontSize = 13.sp,
+                                                        color = FluentTheme.colors.textMuted
+                                                )
+                                                if (stat.onClick != null) {
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Icon(
+                                                                imageVector = Icons.Default.KeyboardArrowRight,
+                                                                contentDescription = null,
+                                                                tint = FluentTheme.colors.textMuted,
+                                                                modifier = Modifier.size(16.dp)
+                                                        )
+                                                }
+                                        }
+                                        Divider(
+                                                color = FluentTheme.colors.panelBorder.copy(alpha = 0.5f),
+                                                modifier = Modifier.padding(start = 26.dp)
+                                        )
+                                }
+
+                                item {
+                                        Box(
+                                                modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(vertical = 16.dp),
+                                                contentAlignment = Alignment.Center
+                                        ) {
+                                                Text(
+                                                        text = "Analysis completed in ${analysisTimeMs}ms",
+                                                        fontSize = 11.sp,
+                                                        color = FluentTheme.colors.textMuted,
+                                                        style = MaterialTheme.typography.bodySmall
+                                                )
+                                        }
+                                }
+                        }
                 }
         }
 }
 
 // ---------------- HOME DASHBOARD ----------------
+
 @Composable
 fun HomeDashboard(
         onNavigateToDir: (File) -> Unit,
@@ -4378,6 +5435,21 @@ fun HomeDashboard(
                 remember(totalSpace, usedSpace) {
                         if (totalSpace > 0) usedSpace.toFloat() / totalSpace else 0f
                 }
+
+        var progressAnim by remember { mutableStateOf(0f) }
+        val animatedProgress by animateFloatAsState(
+                targetValue = progressAnim,
+                animationSpec = tween(durationMillis = 520, easing = FastOutSlowInEasing),
+                label = "homeStorageProgress"
+        )
+        LaunchedEffect(usedRatio) {
+                progressAnim = 0f
+                progressAnim = 1f
+        }
+
+        val displayUsedRatio = usedRatio * animatedProgress
+        val displayUsedSpace = usedSpace
+        val displayFreeSpace = freeSpace
 
         LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -4420,7 +5492,7 @@ fun HomeDashboard(
                                                 Box(
                                                         modifier =
                                                                 Modifier.fillMaxHeight()
-                                                                        .fillMaxWidth(usedRatio)
+                                                                        .fillMaxWidth(displayUsedRatio)
                                                                         .clip(CircleShape)
                                                                         .background(
                                                                                 Brush.horizontalGradient(
@@ -4444,13 +5516,13 @@ fun HomeDashboard(
                                                 horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
                                                 Text(
-                                                        text = "${formatSize(usedSpace)} Used",
+                                                        text = "${formatSize(displayUsedSpace)} Used",
                                                         fontSize = 12.sp,
                                                         color = FluentTheme.colors.textColor,
                                                         fontWeight = FontWeight.Medium
                                                 )
                                                 Text(
-                                                        text = "${formatSize(freeSpace)} Free",
+                                                        text = "${formatSize(displayFreeSpace)} Free",
                                                         fontSize = 12.sp,
                                                         color = FluentTheme.colors.connectedText,
                                                         fontWeight = FontWeight.Medium
@@ -4477,281 +5549,174 @@ fun HomeDashboard(
                 }
 
                 item {
-                        // Category Buttons Grid
-                        data class CategoryItem(
-                                val name: String,
-                                val icon: androidx.compose.ui.graphics.vector.ImageVector,
-                                val color: Color,
-                                val extensions: List<String>
+                        val categoriesList = listOf(
+                                CategoryItem(
+                                        "Images",
+                                        Icons.Default.Image,
+                                        listOf(Color(0xFFFF5252), Color(0xFFFF7A00)),
+                                        listOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
+                                ),
+                                CategoryItem(
+                                        "Documents",
+                                        Icons.Default.Description,
+                                        listOf(Color(0xFFFFB300), Color(0xFFF57C00)),
+                                        listOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt")
+                                ),
+                                CategoryItem(
+                                        "Videos",
+                                        Icons.Default.VideoFile,
+                                        listOf(Color(0xFFEC407A), Color(0xFFAB47BC)),
+                                        listOf("mp4", "mkv", "webm", "avi", "3gp", "mov")
+                                ),
+                                CategoryItem(
+                                        "Audio files",
+                                        Icons.Default.MusicNote,
+                                        listOf(Color(0xFF29B6F6), Color(0xFF0288D1)),
+                                        listOf("mp3", "wav", "m4a", "flac", "ogg", "aac")
+                                ),
+                                CategoryItem(
+                                        "Installation files",
+                                        Icons.Default.Android,
+                                        listOf(Color(0xFF66BB6A), Color(0xFF43A047)),
+                                        listOf("apk")
+                                ),
+                                CategoryItem(
+                                        "Downloads",
+                                        Icons.Default.Download,
+                                        listOf(Color(0xFF26A69A), Color(0xFF00796B)),
+                                        emptyList()
+                                )
                         )
 
-                        val categoriesList =
-                                listOf(
-                                        CategoryItem(
-                                                "Images",
-                                                Icons.Default.Image,
-                                                Color(0xFFF47C60),
-                                                listOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
-                                        ),
-                                        CategoryItem(
-                                                "Videos",
-                                                Icons.Default.VideoFile,
-                                                Color(0xFFB57EDC),
-                                                listOf("mp4", "mkv", "webm", "avi", "3gp", "mov")
-                                        ),
-                                        CategoryItem(
-                                                "Audio files",
-                                                Icons.Default.MusicNote,
-                                                Color(0xFF75A6FF),
-                                                listOf("mp3", "wav", "m4a", "flac", "ogg", "aac")
-                                        ),
-                                        CategoryItem(
-                                                "Documents",
-                                                Icons.Default.Description,
-                                                Color(0xFFE5B575),
-                                                listOf(
-                                                        "pdf",
-                                                        "doc",
-                                                        "docx",
-                                                        "xls",
-                                                        "xlsx",
-                                                        "ppt",
-                                                        "pptx",
-                                                        "txt"
-                                                )
-                                        ),
-                                        CategoryItem(
-                                                "Installation files",
-                                                Icons.Default.Android,
-                                                Color(0xFF9CCC65),
-                                                listOf("apk")
-                                        ),
-                                        CategoryItem(
-                                                "Downloads",
-                                                Icons.Default.Download,
-                                                Color(0xFF4AC4CF),
-                                                emptyList()
-                                        )
-                                )
-
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                                Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                        categoriesList.take(3).forEach { cat ->
-                                                CategoryCard(
-                                                        cat.name,
-                                                        cat.icon,
-                                                        cat.color,
-                                                        onClick = {
-                                                                onNavigateToCategory(
-                                                                        cat.name,
-                                                                        cat.extensions
-                                                                )
-                                                        }
-                                                )
-                                        }
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                        categoriesList.drop(3).forEach { cat ->
-                                                CategoryCard(
-                                                        cat.name,
-                                                        cat.icon,
-                                                        cat.color,
-                                                        onClick = {
-                                                                if (cat.name == "Downloads") {
-                                                                        onNavigateToDir(
-                                                                                Environment
-                                                                                        .getExternalStoragePublicDirectory(
-                                                                                                Environment
-                                                                                                        .DIRECTORY_DOWNLOADS
-                                                                                        )
-                                                                        )
-                                                                } else {
-                                                                        onNavigateToCategory(
-                                                                                cat.name,
-                                                                                cat.extensions
-                                                                        )
-                                                                }
-                                                        }
-                                                )
-                                        }
-                                }
-                        }
-                }
-
-                // Quick shortcut locations (Storage drives, Recycle Bin, Favorites)
-                item {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                storages.forEach { storage ->
-                                        Card(
-                                                modifier =
-                                                        Modifier.fillMaxWidth().clickable {
-                                                                onNavigateToDir(File(storage.path))
-                                                        },
-                                                colors =
-                                                        CardDefaults.cardColors(
-                                                                containerColor =
-                                                                        FluentTheme.colors.surfaceBg
-                                                        ),
-                                                border =
-                                                        BorderStroke(
-                                                                1.dp,
-                                                                FluentTheme.colors.panelBorder
-                                                        )
-                                        ) {
-                                                Row(
-                                                        modifier = Modifier.padding(14.dp),
-                                                        verticalAlignment =
-                                                                Alignment.CenterVertically
-                                                ) {
-                                                        Icon(
-                                                                imageVector =
-                                                                        if (storage.isSdCard)
-                                                                                Icons.Default.SdCard
-                                                                        else Icons.Default.Storage,
-                                                                contentDescription = null,
-                                                                tint = FluentTheme.colors.accent,
-                                                                modifier = Modifier.size(24.dp)
-                                                        )
-                                                        Spacer(modifier = Modifier.width(10.dp))
-                                                        Column {
-                                                                Text(
-                                                                        storage.name,
-                                                                        fontWeight =
-                                                                                FontWeight.Bold,
-                                                                        fontSize = 13.sp,
-                                                                        color =
-                                                                                FluentTheme.colors
-                                                                                        .textColor
-                                                                )
-                                                                Text(
-                                                                        "${formatSize(storage.usedBytes)} used of ${formatSize(storage.totalBytes)}",
-                                                                        fontSize = 11.sp,
-                                                                        color =
-                                                                                FluentTheme.colors
-                                                                                        .textMuted
-                                                                )
-                                                        }
-                                                }
-                                        }
-                                }
-
+                        Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
                                 Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        horizontalArrangement = Arrangement.SpaceEvenly
                                 ) {
-                                        // Recycle Bin Card
-                                        Card(
-                                                modifier =
-                                                        Modifier.weight(1f).clickable {
-                                                                onNavigateToTrash()
-                                                        },
-                                                colors =
-                                                        CardDefaults.cardColors(
-                                                                containerColor =
-                                                                        FluentTheme.colors.surfaceBg
-                                                        ),
-                                                border =
-                                                        BorderStroke(
-                                                                1.dp,
-                                                                FluentTheme.colors.panelBorder
-                                                        )
-                                        ) {
-                                                Row(
-                                                        modifier = Modifier.padding(14.dp),
-                                                        verticalAlignment =
-                                                                Alignment.CenterVertically
-                                                ) {
-                                                        Icon(
-                                                                Icons.Default.DeleteSweep,
-                                                                contentDescription = null,
-                                                                tint =
-                                                                        FluentTheme.colors
-                                                                                .dangerText,
-                                                                modifier = Modifier.size(24.dp)
-                                                        )
-                                                        Spacer(modifier = Modifier.width(10.dp))
-                                                        Column {
-                                                                Text(
-                                                                        "Recycle Bin",
-                                                                        fontWeight =
-                                                                                FontWeight.Bold,
-                                                                        fontSize = 13.sp,
-                                                                        color =
-                                                                                FluentTheme.colors
-                                                                                        .textColor
-                                                                )
-                                                                Text(
-                                                                        "Restore deleted",
-                                                                        fontSize = 11.sp,
-                                                                        color =
-                                                                                FluentTheme.colors
-                                                                                        .textMuted
-                                                                )
-                                                        }
+                                        categoriesList.take(3).forEach { cat ->
+                                                Box(modifier = Modifier.weight(1f)) {
+                                                        CategoryItemCardless(cat, onNavigateToCategory, onNavigateToDir)
                                                 }
                                         }
-
-                                        // Favorites card
-                                        Card(
-                                                modifier =
-                                                        Modifier.weight(1f).clickable {
-                                                                onNavigateToFavorites()
-                                                        },
-                                                colors =
-                                                        CardDefaults.cardColors(
-                                                                containerColor =
-                                                                        FluentTheme.colors.surfaceBg
-                                                        ),
-                                                border =
-                                                        BorderStroke(
-                                                                1.dp,
-                                                                FluentTheme.colors.panelBorder
-                                                        )
-                                        ) {
-                                                Row(
-                                                        modifier = Modifier.padding(14.dp),
-                                                        verticalAlignment =
-                                                                Alignment.CenterVertically
-                                                ) {
-                                                        Icon(
-                                                                Icons.Default.Star,
-                                                                contentDescription = null,
-                                                                tint = Color(0xFFFFB900),
-                                                                modifier = Modifier.size(24.dp)
-                                                        )
-                                                        Spacer(modifier = Modifier.width(10.dp))
-                                                        Column {
-                                                                Text(
-                                                                        "Favorites",
-                                                                        fontWeight =
-                                                                                FontWeight.Bold,
-                                                                        fontSize = 13.sp,
-                                                                        color =
-                                                                                FluentTheme.colors
-                                                                                        .textColor
-                                                                )
-                                                                Text(
-                                                                        "Starred items",
-                                                                        fontSize = 11.sp,
-                                                                        color =
-                                                                                FluentTheme.colors
-                                                                                        .textMuted
-                                                                )
-                                                        }
+                                }
+                                Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceEvenly
+                                ) {
+                                        categoriesList.drop(3).forEach { cat ->
+                                                Box(modifier = Modifier.weight(1f)) {
+                                                        CategoryItemCardless(cat, onNavigateToCategory, onNavigateToDir)
                                                 }
                                         }
                                 }
                         }
                 }
 
-                // 3. RECENT FILES
+                // 3. STORAGE AND DRIVES
+                item {
+                        Text(
+                                text = "Storage",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp,
+                                color = FluentTheme.colors.textMuted,
+                                letterSpacing = 0.5.sp
+                        )
+                }
+
+                item {
+                        Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                                storages.forEach { storage ->
+                                        Box(modifier = Modifier.weight(1f)) {
+                                                StorageItemCardless(storage, onNavigateToDir)
+                                        }
+                                }
+                                if (storages.size == 1) {
+                                        Spacer(modifier = Modifier.weight(1f))
+                                }
+                        }
+                }
+
+                // 4. TRASH AND FAVORITES
+                item {
+                        Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                                // Recycle Bin Card
+                                Card(
+                                        modifier = Modifier.weight(1f).clickable { onNavigateToTrash() },
+                                        colors = CardDefaults.cardColors(containerColor = FluentTheme.colors.surfaceBg),
+                                        border = BorderStroke(1.dp, FluentTheme.colors.panelBorder)
+                                ) {
+                                        Row(
+                                                modifier = Modifier.padding(14.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                                Icon(
+                                                        Icons.Default.DeleteSweep,
+                                                        contentDescription = null,
+                                                        tint = FluentTheme.colors.dangerText,
+                                                        modifier = Modifier.size(24.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(10.dp))
+                                                Column {
+                                                        Text(
+                                                                "Recycle Bin",
+                                                                fontWeight = FontWeight.Bold,
+                                                                fontSize = 13.sp,
+                                                                color = FluentTheme.colors.textColor
+                                                        )
+                                                        Text(
+                                                                "Restore deleted",
+                                                                fontSize = 11.sp,
+                                                                color = FluentTheme.colors.textMuted
+                                                        )
+                                                }
+                                        }
+                                }
+
+                                // Favorites card
+                                Card(
+                                        modifier = Modifier.weight(1f).clickable { onNavigateToFavorites() },
+                                        colors = CardDefaults.cardColors(containerColor = FluentTheme.colors.surfaceBg),
+                                        border = BorderStroke(1.dp, FluentTheme.colors.panelBorder)
+                                ) {
+                                        Row(
+                                                modifier = Modifier.padding(14.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                                Icon(
+                                                        Icons.Default.Star,
+                                                        contentDescription = null,
+                                                        tint = Color(0xFFFFB900),
+                                                        modifier = Modifier.size(24.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(10.dp))
+                                                Column {
+                                                        Text(
+                                                                "Favorites",
+                                                                fontWeight = FontWeight.Bold,
+                                                                fontSize = 13.sp,
+                                                                color = FluentTheme.colors.textColor
+                                                        )
+                                                        Text(
+                                                                "Starred items",
+                                                                fontSize = 11.sp,
+                                                                color = FluentTheme.colors.textMuted
+                                                        )
+                                                }
+                                        }
+                                }
+                        }
+                }
+
+                // 5. RECENT FILES
                 item {
                         Text(
                                 text = "Recent Files",
@@ -4766,11 +5731,7 @@ fun HomeDashboard(
                         item {
                                 Card(
                                         modifier = Modifier.fillMaxWidth(),
-                                        colors =
-                                                CardDefaults.cardColors(
-                                                        containerColor =
-                                                                FluentTheme.colors.surfaceBg
-                                                ),
+                                        colors = CardDefaults.cardColors(containerColor = FluentTheme.colors.surfaceBg),
                                         border = BorderStroke(1.dp, FluentTheme.colors.panelBorder)
                                 ) {
                                         Box(
@@ -4850,21 +5811,25 @@ private fun ImageAlbumsGrid(
         onAlbumClick: (ImageAlbum) -> Unit,
         modifier: Modifier = Modifier
 ) {
-        if (albums.isEmpty() && !isLoading) {
-                Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(
-                                        imageVector = Icons.Default.PhotoAlbum,
-                                        contentDescription = null,
-                                        tint = FluentTheme.colors.textMuted,
-                                        modifier = Modifier.size(64.dp)
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                Text(
-                                        "No albums found",
-                                        color = FluentTheme.colors.textColor,
-                                        fontWeight = FontWeight.SemiBold
-                                )
+        if (albums.isEmpty()) {
+                if (isLoading) {
+                        PlaceholderAlbumsGrid(modifier = modifier)
+                } else {
+                        Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Icon(
+                                                imageVector = Icons.Default.PhotoAlbum,
+                                                contentDescription = null,
+                                                tint = FluentTheme.colors.textMuted,
+                                                modifier = Modifier.size(64.dp)
+                                        )
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        Text(
+                                                "No albums found",
+                                                color = FluentTheme.colors.textColor,
+                                                fontWeight = FontWeight.SemiBold
+                                        )
+                                }
                         }
                 }
                 return
@@ -4902,11 +5867,54 @@ private fun ImageAlbumsGrid(
                                                                         RoundedCornerShape(28.dp)
                                                                 )
                                         ) {
-                                                AsyncImage(
-                                                        model = album.coverFile,
+                                                SubcomposeAsyncImage(
+                                                        model =
+                                                                coil.request.ImageRequest
+                                                                        .Builder(LocalContext.current)
+                                                                        .data(album.coverFile)
+                                                                        .crossfade(false)
+                                                                        .build(),
                                                         contentDescription = album.name,
                                                         contentScale = ContentScale.Crop,
-                                                        modifier = Modifier.fillMaxSize()
+                                                        modifier =
+                                                                Modifier.fillMaxSize()
+                                                                        .background(
+                                                                                FluentTheme.colors
+                                                                                        .surfaceBg
+                                                                        ),
+                                                        loading = {
+                                                                Box(
+                                                                        modifier =
+                                                                                Modifier.fillMaxSize()
+                                                                                        .background(
+                                                                                                shimmerBrush()
+                                                                                        )
+                                                                )
+                                                        },
+                                                        error = {
+                                                                Box(
+                                                                        modifier =
+                                                                                Modifier.fillMaxSize()
+                                                                                        .background(
+                                                                                                FluentTheme.colors
+                                                                                                        .panelBorder
+                                                                                        ),
+                                                                        contentAlignment =
+                                                                                Alignment.Center
+                                                                ) {
+                                                                        Icon(
+                                                                                Icons.Default
+                                                                                        .BrokenImage,
+                                                                                contentDescription =
+                                                                                        null,
+                                                                                tint =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .textMuted
+                                                                        )
+                                                                }
+                                                        },
+                                                        success = { SubcomposeAsyncImageContent() }
                                                 )
                                         }
                                         Spacer(modifier = Modifier.height(10.dp))
@@ -4957,7 +5965,9 @@ fun DirectoryViewer(
         isLoading: Boolean = false
 ) {
         if (files.isEmpty()) {
-                if (!isLoading) {
+                if (isLoading) {
+                        PlaceholderList()
+                } else {
                         Box(
                                 modifier = Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.Center
@@ -5201,7 +6211,8 @@ fun LocalFileRow(
                                                 Modifier.size(44.dp)
                                                         .clip(RoundedCornerShape(8.dp))
                                                         .background(
-                                                                iconInfo.second.copy(alpha = 0.15f)
+                                                                if (file.isDirectory) Color.Transparent
+                                                                else iconInfo.second.copy(alpha = 0.15f)
                                                         ),
                                         contentAlignment = Alignment.Center
                                 ) {
@@ -5209,7 +6220,7 @@ fun LocalFileRow(
                                                 imageVector = iconInfo.first,
                                                 contentDescription = null,
                                                 tint = iconInfo.second,
-                                                modifier = Modifier.size(24.dp)
+                                                modifier = Modifier.size(if (file.isDirectory) 28.dp else 24.dp)
                                         )
                                 }
                         }
@@ -8332,6 +9343,27 @@ fun FullScreenSwipeImageViewerDialog(
                 showDetails = false // Hide details on swipe to next image
         }
 
+        LaunchedEffect(pagerState.currentPage, imageFiles) {
+                val currentPage = pagerState.currentPage
+                val pagesToWarm =
+                        (currentPage - 2..currentPage + 2).filter {
+                                it in imageFiles.indices
+                        }
+                pagesToWarm.forEach { index ->
+                        val warmFile = imageFiles[index]
+                        val request =
+                                coil.request.ImageRequest.Builder(context)
+                                        .data(warmFile)
+                                        .size(4096, 4096)
+                                        .precision(coil.size.Precision.INEXACT)
+                                        .allowHardware(true)
+                                        .memoryCacheKey("${warmFile.absolutePath}:preview")
+                                        .diskCacheKey("${warmFile.absolutePath}:preview")
+                                        .build()
+                        context.imageLoader.enqueue(request)
+                }
+        }
+
         LaunchedEffect(isCropMode) {
                 if (isCropMode) {
                         scale = 1f
@@ -8433,8 +9465,13 @@ fun FullScreenSwipeImageViewerDialog(
                                                                 }
                                         ) { page ->
                                                 val file = imageFiles[page]
-                                                val imageSize =
-                                                        remember(file) {
+                                                val imageSize by
+                                                        produceState(
+                                                                initialValue = Pair(0, 0),
+                                                                key1 = file
+                                                        ) {
+                                                                value =
+                                                                        withContext(Dispatchers.IO) {
                                                                 try {
                                                                         val options =
                                                                                 android.graphics
@@ -8457,6 +9494,7 @@ fun FullScreenSwipeImageViewerDialog(
                                                                 } catch (e: Exception) {
                                                                         Pair(0, 0)
                                                                 }
+                                                        }
                                                         }
                                                 val autoFitScale =
                                                         remember(imageSize, rotation, wBox, hBox) {
@@ -8572,7 +9610,13 @@ fun FullScreenSwipeImageViewerDialog(
                                                                                         LocalContext
                                                                                                 .current
                                                                                 )
-                                                                                .data(file)
+                                                                                        .data(file)
+                                                                                .memoryCacheKey(
+                                                                                        "${file.absolutePath}:preview"
+                                                                                )
+                                                                                .diskCacheKey(
+                                                                                        "${file.absolutePath}:preview"
+                                                                                )
                                                                                 .size(
                                                                                         4096,
                                                                                         4096
@@ -9902,6 +10946,101 @@ fun FullScreenSwipeImageViewerDialog(
 
 // ---------------- BASIC TEXTFIELD MINIMAL FOR SEARCH ----------------
 @Composable
+private fun Modifier.mediaGridDragSelection(
+        files: List<File>,
+        gridState: LazyGridState,
+        selectedFiles: MutableList<File>,
+        onLongPressedItem: (File) -> Unit,
+        onSelectionModeChange: (Boolean) -> Unit
+): Modifier {
+        val edgeThresholdPx = with(LocalDensity.current) { 72.dp.toPx() }
+        val maxScrollStepPx = with(LocalDensity.current) { 26.dp.toPx() }
+        var isDraggingSelection by remember { mutableStateOf(false) }
+        var pointerPosition by remember { mutableStateOf<Offset?>(null) }
+        var shouldSelectDraggedItems by remember { mutableStateOf(true) }
+        val touchedPaths = remember { mutableSetOf<String>() }
+
+        fun applySelectionAt(position: Offset) {
+                val file = gridState.fileAtPosition(position, files) ?: return
+                if (!touchedPaths.add(file.absolutePath)) return
+                if (shouldSelectDraggedItems) {
+                        if (!selectedFiles.contains(file)) selectedFiles.add(file)
+                } else {
+                        selectedFiles.remove(file)
+                }
+        }
+
+        fun finishDragSelection() {
+                isDraggingSelection = false
+                pointerPosition = null
+                touchedPaths.clear()
+                if (selectedFiles.isEmpty()) onSelectionModeChange(false)
+        }
+
+        LaunchedEffect(isDraggingSelection, pointerPosition, files) {
+                while (isDraggingSelection) {
+                        val position = pointerPosition ?: break
+                        val viewportHeight = gridState.layoutInfo.viewportSize.height.toFloat()
+                        val scrollStep =
+                                when {
+                                        position.y < edgeThresholdPx ->
+                                                -maxScrollStepPx *
+                                                        (1f - (position.y / edgeThresholdPx))
+                                                                .coerceIn(0.15f, 1f)
+                                        position.y > viewportHeight - edgeThresholdPx ->
+                                                maxScrollStepPx *
+                                                        (1f -
+                                                                        ((viewportHeight -
+                                                                                        position.y) /
+                                                                                edgeThresholdPx))
+                                                                .coerceIn(0.15f, 1f)
+                                        else -> 0f
+                                }
+                        if (scrollStep != 0f) {
+                                gridState.scrollBy(scrollStep)
+                                applySelectionAt(position)
+                        }
+                        kotlinx.coroutines.delay(16L)
+                }
+        }
+
+        return pointerInput(files, gridState) {
+                detectDragGesturesAfterLongPress(
+                        onDragStart = { position ->
+                                val file =
+                                        gridState.fileAtPosition(position, files)
+                                                ?: return@detectDragGesturesAfterLongPress
+                                onLongPressedItem(file)
+                                shouldSelectDraggedItems = !selectedFiles.contains(file)
+                                touchedPaths.clear()
+                                onSelectionModeChange(true)
+                                isDraggingSelection = true
+                                pointerPosition = position
+                                applySelectionAt(position)
+                        },
+                        onDrag = { change, _ ->
+                                pointerPosition = change.position
+                                applySelectionAt(change.position)
+                                change.consume()
+                        },
+                        onDragEnd = { finishDragSelection() },
+                        onDragCancel = { finishDragSelection() }
+                )
+        }
+}
+
+private fun LazyGridState.fileAtPosition(position: Offset, files: List<File>): File? {
+        val item =
+                layoutInfo.visibleItemsInfo.firstOrNull {
+                        position.x >= it.offset.x &&
+                                position.x <= it.offset.x + it.size.width &&
+                                position.y >= it.offset.y &&
+                                position.y <= it.offset.y + it.size.height
+                }
+        return item?.index?.let { files.getOrNull(it) }
+}
+
+@Composable
 private fun ExplorerBasicTextField(
         value: String,
         onValueChange: (String) -> Unit,
@@ -9941,11 +11080,11 @@ private fun ExplorerBasicTextField(
 private fun formatSize(bytes: Long): String {
         if (bytes <= 0) return "0 B"
         val units = arrayOf("B", "KB", "MB", "GB", "TB")
-        val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
+        val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1000.0)).toInt()
         return String.format(
                 Locale.US,
                 "%.1f %s",
-                bytes / Math.pow(1024.0, digitGroups.toDouble()),
+                bytes / Math.pow(1000.0, digitGroups.toDouble()),
                 units[digitGroups]
         )
 }
@@ -9994,7 +11133,7 @@ private fun sortImageAlbums(
 
 private fun getFileIcon(file: File): Pair<androidx.compose.ui.graphics.vector.ImageVector, Color> {
         if (file.isDirectory) {
-                return Pair(Icons.Default.Folder, Color(0xFF0078D4))
+                return Pair(Icons.Outlined.Folder, Color(0xFF94A8BF))
         }
         return when (file.extension.lowercase()) {
                 "pdf" -> Pair(Icons.Default.Description, Color(0xFFC42B1C))
@@ -10586,3 +11725,148 @@ fun PathBreadcrumbs(
                 }
         }
 }
+
+@Composable
+fun shimmerBrush(): Brush {
+        val themeColors = FluentTheme.colors
+        val baseColor = themeColors.surfaceBg
+        val highlightColor = themeColors.panelBorder
+
+        val transition = rememberInfiniteTransition(label = "shimmer")
+        val translateAnim by transition.animateFloat(
+                initialValue = 0f,
+                targetValue = 1000f,
+                animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 1200, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
+                ),
+                label = "shimmerTranslate"
+        )
+
+        return Brush.linearGradient(
+                colors = listOf(
+                        baseColor,
+                        highlightColor,
+                        baseColor
+                ),
+                start = Offset(x = translateAnim - 300f, y = translateAnim - 300f),
+                end = Offset(x = translateAnim, y = translateAnim)
+        )
+}
+
+@Composable
+fun PlaceholderImageGrid() {
+        val brush = shimmerBrush()
+        LazyVerticalGrid(
+                columns = GridCells.Adaptive(110.dp),
+                contentPadding = PaddingValues(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize()
+        ) {
+                items(20) {
+                        Box(
+                                modifier = Modifier
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(FluentTheme.dims.surfaceRadius))
+                                        .background(brush)
+                                        .border(
+                                                width = 1.dp,
+                                                color = FluentTheme.colors.panelBorder,
+                                                shape = RoundedCornerShape(FluentTheme.dims.surfaceRadius)
+                                        )
+                        )
+                }
+        }
+}
+
+@Composable
+fun PlaceholderAlbumsGrid(modifier: Modifier = Modifier) {
+        val brush = shimmerBrush()
+        LazyVerticalGrid(
+                columns = GridCells.Adaptive(150.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
+                modifier = modifier.fillMaxSize()
+        ) {
+                items(6) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                                Box(
+                                        modifier = Modifier
+                                                .fillMaxWidth()
+                                                .aspectRatio(1f)
+                                                .clip(RoundedCornerShape(28.dp))
+                                                .background(brush)
+                                                .border(
+                                                        1.dp,
+                                                        FluentTheme.colors.panelBorder,
+                                                        RoundedCornerShape(28.dp)
+                                                )
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Box(
+                                        modifier = Modifier
+                                                .fillMaxWidth(0.7f)
+                                                .height(16.dp)
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(brush)
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Box(
+                                        modifier = Modifier
+                                                .fillMaxWidth(0.3f)
+                                                .height(12.dp)
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(brush)
+                                )
+                        }
+                }
+        }
+}
+
+@Composable
+fun PlaceholderList() {
+        val brush = shimmerBrush()
+        Column(
+                modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+                repeat(10) {
+                        Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                        ) {
+                                Box(
+                                        modifier = Modifier
+                                                .size(40.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(brush)
+                                )
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                        Box(
+                                                modifier = Modifier
+                                                        .fillMaxWidth(0.6f)
+                                                        .height(14.dp)
+                                                        .clip(RoundedCornerShape(4.dp))
+                                                        .background(brush)
+                                        )
+                                        Box(
+                                                modifier = Modifier
+                                                        .fillMaxWidth(0.3f)
+                                                        .height(10.dp)
+                                                        .clip(RoundedCornerShape(4.dp))
+                                                        .background(brush)
+                                        )
+                                }
+                        }
+                }
+        }
+}
+

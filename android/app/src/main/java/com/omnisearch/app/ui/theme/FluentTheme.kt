@@ -59,6 +59,34 @@ val DarkFluentColors = FluentColors(
     isDark = true
 )
 
+val LightMistColors = FluentColors(
+    pageBg = Color(0xFFFFFFFF),
+    panelBg = Color(0xFFE9F1F4),
+    surfaceBg = Color(0xFFE9F1F4),
+    accent = Color(0xFF0078D4),
+    onAccent = Color.White,
+    textColor = Color(0xFF10212A),
+    textMuted = Color(0xFF60717A),
+    panelBorder = Color(0x1A0C1319),
+    connectedText = Color(0xFF0F6C0F),
+    dangerText = Color(0xFFC42B1C),
+    isDark = false
+)
+
+val DarkMistColors = FluentColors(
+    pageBg = Color(0xFF0C1319),
+    panelBg = Color(0xFF16252C),
+    surfaceBg = Color(0xFF16252C),
+    accent = Color(0xFF60CDFF),
+    onAccent = Color(0xFF0C1319),
+    textColor = Color(0xFFF3F8FA),
+    textMuted = Color(0x99F3F8FA),
+    panelBorder = Color(0x1AFFFFFF),
+    connectedText = Color(0xFF6AC46A),
+    dangerText = Color(0xFFFF5A46),
+    isDark = true
+)
+
 val LightOceanColors = FluentColors(
     pageBg = Color(0xFFF0F4F8),
     panelBg = Color(0xFFE1EBF5),
@@ -216,6 +244,7 @@ fun OmniSearchTheme(
     }
 
     val colors = when (themeColor) {
+        "MIST" -> if (isDark) DarkMistColors else LightMistColors
         "OCEAN" -> if (isDark) DarkOceanColors else LightOceanColors
         "FOREST" -> if (isDark) DarkForestColors else LightForestColors
         "SUNSET" -> if (isDark) DarkSunsetColors else LightSunsetColors
