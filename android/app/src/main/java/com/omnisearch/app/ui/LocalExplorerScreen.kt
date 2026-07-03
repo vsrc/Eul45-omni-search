@@ -7042,6 +7042,8 @@ class TextureVideoView(context: android.content.Context) :
                 surfaceTextureListener = this
         }
 
+        fun getMediaPlayer(): android.media.MediaPlayer? = mediaPlayer
+
         val isPlaying: Boolean
                 get() = mediaPlayer?.isPlaying ?: false
 
@@ -7198,7 +7200,102 @@ class TextureVideoView(context: android.content.Context) :
                 return true
         }
 
+        fun setSpeed(speed: Float) {
+                if (android.os.Build.VERSION.SDK_INT >= 23) {
+                        try {
+                                mediaPlayer?.let {
+                                        it.playbackParams = it.playbackParams.setSpeed(speed)
+                                }
+                        } catch (e: Exception) {
+                                e.printStackTrace()
+                        }
+                }
+        }
+
         override fun onSurfaceTextureUpdated(surfaceTexture: android.graphics.SurfaceTexture) {}
+}
+// --- Subtitle & Persistence Helpers ---
+data class SubtitleCue(val startMs: Long, val endMs: Long, val text: String)
+
+fun parseSubtitleFile(file: File): List<SubtitleCue> {
+        val cues = mutableListOf<SubtitleCue>()
+        try {
+                val lines = file.readLines()
+                var i = 0
+                while (i < lines.size) {
+                        val line = lines[i].trim()
+                        if (line.isEmpty() || line.all { it.isDigit() } || line.startsWith("WEBVTT")) {
+                                i++
+                                continue
+                        }
+                        if (line.contains("-->")) {
+                                val timeParts = line.split("-->").map { it.trim() }
+                                if (timeParts.size == 2) {
+                                        val startMs = parseTimeMs(timeParts[0])
+                                        val endMs = parseTimeMs(timeParts[1])
+                                        val textBuilder = java.lang.StringBuilder()
+                                        i++
+                                        while (i < lines.size && lines[i].trim().isNotEmpty()) {
+                                                if (textBuilder.isNotEmpty()) textBuilder.append("\n")
+                                                textBuilder.append(lines[i].trim())
+                                                i++
+                                        }
+                                        cues.add(SubtitleCue(startMs, endMs, textBuilder.toString()))
+                                } else {
+                                        i++
+                                }
+                        } else {
+                                i++
+                        }
+                }
+        } catch (e: Exception) {
+                e.printStackTrace()
+        }
+        return cues
+}
+
+fun parseTimeMs(timeStr: String): Long {
+        try {
+                val parts = timeStr.replace(",", ".").split(":")
+                if (parts.size == 3) {
+                        val hours = parts[0].toLong()
+                        val minutes = parts[1].toLong()
+                        val secParts = parts[2].split(".")
+                        val seconds = secParts[0].toLong()
+                        val ms = if (secParts.size > 1) secParts[1].padEnd(3, '0').substring(0, 3).toLong() else 0L
+                        return hours * 3600000L + minutes * 60000L + seconds * 1000L + ms
+                } else if (parts.size == 2) {
+                        val minutes = parts[0].toLong()
+                        val secParts = parts[1].split(".")
+                        val seconds = secParts[0].toLong()
+                        val ms = if (secParts.size > 1) secParts[1].padEnd(3, '0').substring(0, 3).toLong() else 0L
+                        return minutes * 60000L + seconds * 1000L + ms
+                }
+        } catch (e: Exception) {
+                e.printStackTrace()
+        }
+        return 0L
+}
+
+fun getVideoProgress(context: android.content.Context, path: String): Int {
+        val prefs = context.getSharedPreferences("video_player_progress", android.content.Context.MODE_PRIVATE)
+        return prefs.getInt(path, 0)
+}
+fun saveVideoProgress(context: android.content.Context, path: String, position: Int) {
+        val prefs = context.getSharedPreferences("video_player_progress", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putInt(path, position).apply()
+}
+fun clearVideoProgress(context: android.content.Context, path: String) {
+        val prefs = context.getSharedPreferences("video_player_progress", android.content.Context.MODE_PRIVATE)
+        prefs.edit().remove(path).apply()
+}
+fun isContinuePlayingEnabled(context: android.content.Context): Boolean {
+        val prefs = context.getSharedPreferences("video_player_settings", android.content.Context.MODE_PRIVATE)
+        return prefs.getBoolean("continue_playing_enabled", true)
+}
+fun setContinuePlayingEnabled(context: android.content.Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences("video_player_settings", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("continue_playing_enabled", enabled).apply()
 }
 
 // ---------------- VIDEO PLAYER DIALOG ----------------
@@ -7206,6 +7303,8 @@ class TextureVideoView(context: android.content.Context) :
 fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
         val context = LocalContext.current
         val activity = context as? Activity
+        val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+        val isCurrentLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         var isPlaying by remember { mutableStateOf(false) }
         var currentPosition by remember { mutableStateOf(0) }
         var duration by remember { mutableStateOf(0) }
@@ -7215,6 +7314,81 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
         var showDetails by remember { mutableStateOf(false) }
         var videoZoom by remember { mutableStateOf(1f) }
         var videoOffset by remember { mutableStateOf(Offset.Zero) }
+
+        val coroutineScope = rememberCoroutineScope()
+
+        // Option sheet states
+        var showMoreOptions by remember { mutableStateOf(false) }
+        var optionsActiveTab by remember { mutableStateOf("main") } // "main", "subtitle", "speed"
+        var playbackSpeed by remember { mutableStateOf(1.0f) }
+        var continuePlayingEnabled by remember { mutableStateOf(isContinuePlayingEnabled(context)) }
+        var showCustomSpeedDialog by remember { mutableStateOf(false) }
+
+        // Subtitle states
+        var subtitlesEnabled by remember { mutableStateOf(true) }
+        var localSubFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+        var embeddedSubTracks by remember { mutableStateOf<List<Pair<Int, String>>>(emptyList()) }
+        var selectedSubtitleFile by remember { mutableStateOf<File?>(null) }
+        var selectedEmbeddedTrack by remember { mutableStateOf<Int?>(null) }
+        var selectedSubtitleName by remember { mutableStateOf("None") }
+        var subtitleCues by remember { mutableStateOf<List<SubtitleCue>>(emptyList()) }
+        var importedSubtitleCues by remember { mutableStateOf<List<SubtitleCue>>(emptyList()) }
+        var nativeTimedText by remember { mutableStateOf("") }
+        var subtitleBgColor by remember { mutableStateOf(Color.Transparent) }
+
+        val subtitlePickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+                onResult = { uri ->
+                        if (uri != null) {
+                                try {
+                                        context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                                                val tempFile = File(context.cacheDir, "imported_subtitle.srt")
+                                                tempFile.outputStream().use { outputStream ->
+                                                        inputStream.copyTo(outputStream)
+                                                }
+                                                val parsed = parseSubtitleFile(tempFile)
+                                                if (parsed.isNotEmpty()) {
+                                                        importedSubtitleCues = parsed
+                                                        subtitleCues = parsed
+                                                        selectedSubtitleFile = null
+                                                        selectedSubtitleName = "Imported Subtitle"
+                                                        subtitlesEnabled = true
+                                                }
+                                        }
+                                } catch (e: Exception) {
+                                        e.printStackTrace()
+                                }
+                        }
+                }
+        )
+
+        LaunchedEffect(file) {
+                // Auto-detect subtitles in the same folder
+                val parentDir = file.parentFile
+                if (parentDir != null && parentDir.isDirectory) {
+                        val subs = parentDir.listFiles { f ->
+                                val name = f.name.lowercase(java.util.Locale.getDefault())
+                                name.endsWith(".srt") || name.endsWith(".vtt")
+                        }?.toList() ?: emptyList()
+                        localSubFiles = subs
+                        val matchingSub = subs.firstOrNull { f ->
+                                f.nameWithoutExtension == file.nameWithoutExtension
+                        } ?: subs.firstOrNull()
+                        if (matchingSub != null) {
+                                selectedSubtitleFile = matchingSub
+                                selectedSubtitleName = matchingSub.name
+                        }
+                }
+        }
+
+        LaunchedEffect(selectedSubtitleFile) {
+                if (selectedSubtitleFile != null) {
+                        subtitleCues = parseSubtitleFile(selectedSubtitleFile!!)
+                } else if (selectedSubtitleName != "Imported Subtitle") {
+                        subtitleCues = emptyList()
+                }
+        }
+
 
         val audioManager = remember { context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager }
         val maxVolume = remember { audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC).toFloat() }
@@ -7407,7 +7581,16 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
         DisposableEffect(Unit) {
                 onDispose {
                         try {
-                                videoViewRef?.stopPlayback()
+                                videoViewRef?.let {
+                                        val pos = it.currentPosition
+                                        val dur = it.duration
+                                        if (pos > 0 && pos < dur - 2000 && continuePlayingEnabled) {
+                                                saveVideoProgress(context, file.absolutePath, pos)
+                                        } else if (pos >= dur - 2000) {
+                                                clearVideoProgress(context, file.absolutePath)
+                                        }
+                                        it.stopPlayback()
+                                }
                         } catch (t: Throwable) {}
                         videoViewRef = null
                         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -7422,6 +7605,9 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                         currentPosition = it.currentPosition
                                         if (duration == 0 && it.duration > 0) {
                                                 duration = it.duration
+                                        }
+                                        if (currentPosition > 0 && currentPosition < it.duration - 2000 && continuePlayingEnabled) {
+                                                saveVideoProgress(context, file.absolutePath, currentPosition)
                                         }
                                 } catch (t: Throwable) {}
                         }
@@ -7544,9 +7730,10 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                 showDetails,
                                                                 videoZoom,
                                                                 mediaWidth,
-                                                                duration
+                                                                duration,
+                                                                showMoreOptions
                                                         ) {
-                                                                if (videoZoom <= 1.01f) {
+                                                                if (videoZoom <= 1.01f && !showMoreOptions) {
                                                                         var totalDragX = 0f
                                                                         var totalDragY = 0f
                                                                         var gestureStartX = 0f
@@ -7732,10 +7919,10 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                         )
                                                                 }
                                                         }
-                                                        .pointerInput(showDetails, mediaWidth, mediaHeight) {
+                                                        .pointerInput(showDetails, mediaWidth, mediaHeight, showMoreOptions) {
                                                                 detectTapGestures(
                                                                         onDoubleTap = { tapOffset ->
-                                                                                if (!showDetails) {
+                                                                                if (!showDetails && !showMoreOptions) {
                                                                                         if (tapOffset.x < mediaWidth * 0.35f) {
                                                                                                 videoViewRef?.let {
                                                                                                         val newPos = (it.currentPosition - 10000).coerceAtLeast(0)
@@ -7760,8 +7947,11 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                                 }
                                                                         },
                                                                         onTap = {
-                                                                                if (!showDetails)
+                                                                                if (showMoreOptions) {
+                                                                                        showMoreOptions = false
+                                                                                } else if (!showDetails) {
                                                                                         showControls = !showControls
+                                                                                }
                                                                         }
                                                                 )
                                                         }
@@ -7783,12 +7973,52 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                 }
                                                                 setOnPreparedListener { mp ->
                                                                         duration = mp.duration
+                                                                        if (continuePlayingEnabled) {
+                                                                                val savedPos = getVideoProgress(context, file.absolutePath)
+                                                                                if (savedPos > 0) {
+                                                                                        seekTo(savedPos)
+                                                                                        currentPosition = savedPos
+                                                                                }
+                                                                        }
+                                                                        if (android.os.Build.VERSION.SDK_INT >= 23) {
+                                                                                try {
+                                                                                        mp.playbackParams = mp.playbackParams.setSpeed(playbackSpeed)
+                                                                                } catch(e: Exception) {}
+                                                                        }
+                                                                        
+                                                                        try {
+                                                                                val tracks = mp.trackInfo
+                                                                                val subs = mutableListOf<Pair<Int, String>>()
+                                                                                if (tracks != null) {
+                                                                                        for (i in tracks.indices) {
+                                                                                                if (tracks[i].trackType == android.media.MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT || 
+                                                                                                        tracks[i].trackType == android.media.MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE) {
+                                                                                                        val lang = tracks[i].language
+                                                                                                        val name = if (!lang.isNullOrBlank() && lang != "und") "Embedded: $lang" else "Embedded Track ${i + 1}"
+                                                                                                        subs.add(Pair(i, name))
+                                                                                                }
+                                                                                        }
+                                                                                }
+                                                                                embeddedSubTracks = subs
+                                                                                if (subs.isNotEmpty() && selectedEmbeddedTrack == null) {
+                                                                                        if (localSubFiles.isEmpty() && importedSubtitleCues.isEmpty()) {
+                                                                                                selectedEmbeddedTrack = subs[0].first
+                                                                                                mp.selectTrack(subs[0].first)
+                                                                                        }
+                                                                                }
+                                                                                
+                                                                                mp.setOnTimedTextListener { _, text ->
+                                                                                        nativeTimedText = text?.text ?: ""
+                                                                                }
+                                                                        } catch(e: Exception) {}
+
                                                                         start()
                                                                         isPlaying = true
                                                                 }
                                                                 setOnCompletionListener {
                                                                         isPlaying = false
                                                                         currentPosition = duration
+                                                                        clearVideoProgress(context, file.absolutePath)
                                                                 }
                                                                 videoViewRef = this
                                                         }
@@ -7807,6 +8037,32 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                         translationY = videoOffset.y
                                                                 }
                                         )
+
+                                        // Subtitle Overlay
+                                        if (subtitlesEnabled) {
+                                                val currentCue = subtitleCues.find { currentPosition >= it.startMs && currentPosition <= it.endMs }
+                                                val textToShow = currentCue?.text ?: nativeTimedText
+                                                if (textToShow.isNotEmpty()) {
+                                                        Box(
+                                                                modifier = Modifier
+                                                                        .fillMaxSize()
+                                                                        .padding(bottom = if (showControls) 120.dp else 40.dp)
+                                                                        .padding(horizontal = 24.dp),
+                                                                contentAlignment = Alignment.BottomCenter
+                                                        ) {
+                                                                Text(
+                                                                        text = textToShow,
+                                                                        color = Color.White,
+                                                                        fontSize = 18.sp,
+                                                                        fontWeight = FontWeight.SemiBold,
+                                                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                                                        modifier = Modifier
+                                                                                .background(subtitleBgColor, RoundedCornerShape(8.dp))
+                                                                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                                                )
+                                                        }
+                                                }
+                                        }
 
                                         androidx.compose.animation.AnimatedVisibility(
                                                 visible = showControls && !showDetails,
@@ -7882,6 +8138,65 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                                                         12.dp
                                                                                         )
                                                                 )
+                                                                // Playback speed indicator badge (if speed not 1.0f)
+                                                                if (playbackSpeed != 1.0f) {
+                                                                        Row(
+                                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                                modifier = Modifier
+                                                                                        .padding(end = 8.dp)
+                                                                                        .clip(RoundedCornerShape(12.dp))
+                                                                                        .background(Color.Black.copy(alpha = 0.6f))
+                                                                                        .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.3f)), RoundedCornerShape(12.dp))
+                                                                                        .clickable {
+                                                                                                optionsActiveTab = "speed"
+                                                                                                showMoreOptions = true
+                                                                                        }
+                                                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                                        ) {
+                                                                                Icon(
+                                                                                        imageVector = Icons.Outlined.Speed,
+                                                                                        contentDescription = null,
+                                                                                        tint = FluentTheme.colors.accent,
+                                                                                        modifier = Modifier.size(14.dp)
+                                                                                )
+                                                                                Spacer(modifier = Modifier.width(4.dp))
+                                                                                Text(
+                                                                                        text = String.format(java.util.Locale.US, "%.2fx", playbackSpeed),
+                                                                                        color = Color.White,
+                                                                                        fontSize = 11.sp,
+                                                                                        fontWeight = FontWeight.Bold
+                                                                                )
+                                                                        }
+                                                                }
+
+                                                                // Landscape mode direct control buttons
+                                                                if (isCurrentLandscape) {
+                                                                        IconButton(
+                                                                                onClick = {
+                                                                                        optionsActiveTab = "subtitle"
+                                                                                        showMoreOptions = true
+                                                                                }
+                                                                        ) {
+                                                                                Icon(
+                                                                                        imageVector = Icons.Outlined.Subtitles,
+                                                                                        contentDescription = "Subtitles",
+                                                                                        tint = if (subtitlesEnabled) FluentTheme.colors.accent else Color.White
+                                                                                )
+                                                                        }
+                                                                        IconButton(
+                                                                                onClick = {
+                                                                                        optionsActiveTab = "speed"
+                                                                                        showMoreOptions = true
+                                                                                }
+                                                                        ) {
+                                                                                Icon(
+                                                                                        imageVector = Icons.Outlined.Speed,
+                                                                                        contentDescription = "Speed",
+                                                                                        tint = if (playbackSpeed != 1.0f) FluentTheme.colors.accent else Color.White
+                                                                                )
+                                                                        }
+                                                                }
+
                                                                 // Landscape rotation toggle
                                                                 IconButton(
                                                                         onClick = {
@@ -7966,9 +8281,24 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                                 tint = Color.White
                                                                         )
                                                                 }
+
+                                                                // Vertical 3-dots button (options panel trigger)
+                                                                IconButton(
+                                                                        onClick = {
+                                                                                optionsActiveTab = "main"
+                                                                                showMoreOptions = true
+                                                                        }
+                                                                ) {
+                                                                        Icon(
+                                                                                imageVector = Icons.Default.MoreVert,
+                                                                                contentDescription = "Options",
+                                                                                tint = Color.White
+                                                                        )
+                                                                }
                                                         }
 
-                                                        // Center Play/Pause button
+                                                        if (!showMoreOptions) {
+                                                                // Center Play/Pause button
                                                         Box(
                                                                 modifier =
                                                                         Modifier.align(
@@ -8123,6 +8453,7 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                                                                 )
                                                                                         )
                                                                 )
+                                                        }
                                                         }
                                                 }
                                         }
@@ -8469,6 +8800,232 @@ fun LocalVideoPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                 fontSize = 24.sp,
                                                                 fontWeight = FontWeight.Bold
                                                         )
+                                                }
+                                        }
+                                        // More Options Bottom Sheet
+                                        androidx.compose.animation.AnimatedVisibility(
+                                                visible = showMoreOptions,
+                                                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                                                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                                                modifier = Modifier.align(Alignment.BottomCenter)
+                                        ) {
+                                                Surface(
+                                                        modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .navigationBarsPadding(),
+                                                        color = Color.Black,
+                                                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+                                                ) {
+                                                        Column(
+                                                                modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
+                                                        ) {
+                                                                // Header with Title and Close button
+                                                                Row(
+                                                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                                        verticalAlignment = Alignment.CenterVertically
+                                                                ) {
+                                                                        Text(
+                                                                                text = when(optionsActiveTab) {
+                                                                                        "subtitle" -> "Subtitles"
+                                                                                        "speed" -> "Playback Speed"
+                                                                                        else -> "More Options"
+                                                                                },
+                                                                                color = Color.White,
+                                                                                fontSize = 20.sp,
+                                                                                fontWeight = FontWeight.Bold
+                                                                        )
+                                                                        IconButton(onClick = { showMoreOptions = false }) {
+                                                                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                                                                        }
+                                                                }
+
+                                                                // Content based on tab
+                                                                when (optionsActiveTab) {
+                                                                        "main" -> {
+                                                                                Column {
+                                                                                        ListItem(
+                                                                                                headlineContent = { Text("Subtitles", color = Color.White) },
+                                                                                                supportingContent = { Text(if (subtitlesEnabled) "On" else "Off", color = Color.Gray) },
+                                                                                                leadingContent = { Icon(Icons.Outlined.Subtitles, contentDescription = null, tint = Color.White) },
+                                                                                                modifier = Modifier.clickable { optionsActiveTab = "subtitle" },
+                                                                                                colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent)
+                                                                                        )
+                                                                                        ListItem(
+                                                                                                headlineContent = { Text("Playback Speed", color = Color.White) },
+                                                                                                supportingContent = { Text("${playbackSpeed}x", color = Color.Gray) },
+                                                                                                leadingContent = { Icon(Icons.Outlined.Speed, contentDescription = null, tint = Color.White) },
+                                                                                                modifier = Modifier.clickable { optionsActiveTab = "speed" },
+                                                                                                colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent)
+                                                                                        )
+                                                                                        ListItem(
+                                                                                                headlineContent = { Text("Continue Playing", color = Color.White) },
+                                                                                                supportingContent = { Text(if (continuePlayingEnabled) "On" else "Off", color = Color.Gray) },
+                                                                                                leadingContent = { Icon(Icons.Outlined.PlayCircle, contentDescription = null, tint = Color.White) },
+                                                                                                trailingContent = {
+                                                                                                        Switch(
+                                                                                                                checked = continuePlayingEnabled,
+                                                                                                                onCheckedChange = { continuePlayingEnabled = it },
+                                                                                                                colors = androidx.compose.material3.SwitchDefaults.colors(
+                                                                                                                        checkedThumbColor = Color.White,
+                                                                                                                        checkedTrackColor = FluentTheme.colors.accent,
+                                                                                                                        uncheckedThumbColor = Color.White,
+                                                                                                                        uncheckedTrackColor = Color.DarkGray,
+                                                                                                                )
+                                                                                                        )
+                                                                                                },
+                                                                                                colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent)
+                                                                                        )
+                                                                                }
+                                                                        }
+                                                                        "speed" -> {
+                                                                                Column(modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                                                                                        val speeds = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+                                                                                        speeds.forEach { speed ->
+                                                                                                Row(
+                                                                                                        modifier = Modifier
+                                                                                                                .fillMaxWidth()
+                                                                                                                .clickable { 
+                                                                                                                        playbackSpeed = speed
+                                                                                                                        videoViewRef?.setSpeed(speed)
+                                                                                                                        showMoreOptions = false
+                                                                                                                }
+                                                                                                                .padding(horizontal = 24.dp, vertical = 16.dp),
+                                                                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                                                                        verticalAlignment = Alignment.CenterVertically
+                                                                                                ) {
+                                                                                                        Text(
+                                                                                                                text = if (speed == 1.0f) "Normal" else "${speed}x",
+                                                                                                                color = if (playbackSpeed == speed) FluentTheme.colors.accent else Color.White,
+                                                                                                                fontSize = 16.sp
+                                                                                                        )
+                                                                                                        if (playbackSpeed == speed) {
+                                                                                                                Icon(Icons.Default.Check, contentDescription = null, tint = FluentTheme.colors.accent)
+                                                                                                        }
+                                                                                                }
+                                                                                        }
+                                                                                }
+                                                                        }
+                                                                        "subtitle" -> {
+                                                                                Column {
+                                                                                        val hasSubs = localSubFiles.isNotEmpty() || embeddedSubTracks.isNotEmpty() || importedSubtitleCues.isNotEmpty()
+                                                                                        Row(
+                                                                                                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
+                                                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                                                verticalAlignment = Alignment.CenterVertically
+                                                                                        ) {
+                                                                                                Text("Show Subtitles", color = if (hasSubs) Color.White else Color.Gray, fontSize = 16.sp)
+                                                                                                Switch(
+                                                                                                        checked = subtitlesEnabled && hasSubs,
+                                                                                                        enabled = hasSubs,
+                                                                                                        onCheckedChange = { subtitlesEnabled = it },
+                                                                                                        colors = androidx.compose.material3.SwitchDefaults.colors(
+                                                                                                                checkedThumbColor = Color.White,
+                                                                                                                checkedTrackColor = FluentTheme.colors.accent,
+                                                                                                                uncheckedThumbColor = Color.White,
+                                                                                                                uncheckedTrackColor = Color.DarkGray,
+                                                                                                                disabledCheckedThumbColor = Color.Gray,
+                                                                                                                disabledCheckedTrackColor = Color.DarkGray,
+                                                                                                                disabledUncheckedThumbColor = Color.Gray,
+                                                                                                                disabledUncheckedTrackColor = Color.DarkGray
+                                                                                                        )
+                                                                                                )
+                                                                                        }
+                                                                                        // Background Color Picker
+                                                                                        Row(
+                                                                                                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
+                                                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                                                verticalAlignment = Alignment.CenterVertically
+                                                                                        ) {
+                                                                                                Text("Background", color = Color.White, fontSize = 16.sp)
+                                                                                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                                                                                        val colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.5f), Color.Blue.copy(alpha = 0.5f))
+                                                                                                        colors.forEach { col ->
+                                                                                                                Box(
+                                                                                                                        modifier = Modifier
+                                                                                                                                .size(32.dp)
+                                                                                                                                .clip(CircleShape)
+                                                                                                                                .background(if (col == Color.Transparent) Color.DarkGray else col)
+                                                                                                                                .border(if (subtitleBgColor == col) 2.dp else 1.dp, if (subtitleBgColor == col) FluentTheme.colors.accent else Color.White.copy(alpha = 0.3f), CircleShape)
+                                                                                                                                .clickable { subtitleBgColor = col },
+                                                                                                                        contentAlignment = Alignment.Center
+                                                                                                                ) {
+                                                                                                                        if (col == Color.Transparent) {
+                                                                                                                                Icon(Icons.Default.Close, contentDescription = "Transparent", tint = Color.White, modifier = Modifier.size(16.dp))
+                                                                                                                        }
+                                                                                                                }
+                                                                                                        }
+                                                                                                }
+                                                                                        }
+                                                                                        
+                                                                                        if (!hasSubs) {
+                                                                                                Text(
+                                                                                                        "No subtitle files found.",
+                                                                                                        color = Color.Gray,
+                                                                                                        modifier = Modifier.padding(24.dp)
+                                                                                                )
+                                                                                        } else {
+                                                                                                Column(modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                                                                                                        embeddedSubTracks.forEach { track ->
+                                                                                                                Row(
+                                                                                                                        modifier = Modifier
+                                                                                                                                .fillMaxWidth()
+                                                                                                                                .clickable {
+                                                                                                                                        selectedEmbeddedTrack = track.first
+                                                                                                                                        selectedSubtitleFile = null
+                                                                                                                                        videoViewRef?.getMediaPlayer()?.selectTrack(track.first)
+                                                                                                                                }
+                                                                                                                                .padding(horizontal = 24.dp, vertical = 16.dp),
+                                                                                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                                                                                        verticalAlignment = Alignment.CenterVertically
+                                                                                                                ) {
+                                                                                                                        Text(
+                                                                                                                                text = track.second,
+                                                                                                                                color = if (selectedEmbeddedTrack == track.first && selectedSubtitleFile == null) FluentTheme.colors.accent else Color.White,
+                                                                                                                                fontSize = 14.sp
+                                                                                                                        )
+                                                                                                                        if (selectedEmbeddedTrack == track.first && selectedSubtitleFile == null) {
+                                                                                                                                Icon(Icons.Default.Check, contentDescription = null, tint = FluentTheme.colors.accent)
+                                                                                                                        }
+                                                                                                                }
+                                                                                                        }
+                                                                                                        localSubFiles.forEach { subFile ->
+                                                                                                                Row(
+                                                                                                                        modifier = Modifier
+                                                                                                                                .fillMaxWidth()
+                                                                                                                                .clickable {
+                                                                                                                                        selectedSubtitleFile = subFile
+                                                                                                                                        selectedEmbeddedTrack = null
+                                                                                                                                }
+                                                                                                                                .padding(horizontal = 24.dp, vertical = 16.dp),
+                                                                                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                                                                                        verticalAlignment = Alignment.CenterVertically
+                                                                                                                ) {
+                                                                                                                        Text(
+                                                                                                                                text = subFile.name,
+                                                                                                                                color = if (selectedSubtitleFile == subFile) FluentTheme.colors.accent else Color.White,
+                                                                                                                                fontSize = 14.sp
+                                                                                                                        )
+                                                                                                                        if (selectedSubtitleFile == subFile) {
+                                                                                                                                Icon(Icons.Default.Check, contentDescription = null, tint = FluentTheme.colors.accent)
+                                                                                                                        }
+                                                                                                                }
+                                                                                                        }
+                                                                                                }
+                                                                                        }
+                                                                                        Button(
+                                                                                                onClick = { subtitlePickerLauncher.launch(arrayOf("*/*")) },
+                                                                                                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
+                                                                                                colors = ButtonDefaults.buttonColors(containerColor = FluentTheme.colors.accent)
+                                                                                        ) {
+                                                                                                Icon(Icons.Outlined.FileUpload, contentDescription = null)
+                                                                                                Spacer(Modifier.width(8.dp))
+                                                                                                Text("Import Subtitle File")
+                                                                                        }
+                                                                                }
+                                                                        }
+                                                                }
+                                                        }
                                                 }
                                         }
                                 }
