@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -424,13 +425,13 @@ fun SettingsScreen(
 
                 // Social Icon links row
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    SocialButton(label = "GitHub", icon = Icons.Default.Code, url = "https://github.com/Eul45", context = context)
-                    SocialButton(label = "LinkedIn", icon = Icons.Default.AccountCircle, url = "https://www.linkedin.com/in/eyuel-engida-77155a317", context = context)
-                    SocialButton(label = "Telegram", icon = Icons.Default.Send, url = "https://t.me/Eul_zzz", context = context)
+                    SocialButton(label = "GitHub", icon = Icons.Default.Code, url = "https://github.com/Eul45", context = context, modifier = Modifier.weight(1f))
+                    SocialButton(label = "LinkedIn", icon = Icons.Default.AccountCircle, url = "https://www.linkedin.com/in/eyuel-engida-77155a317", context = context, modifier = Modifier.weight(1f))
+                    SocialButton(label = "Telegram", icon = Icons.Default.Send, url = "https://t.me/Eul_zzz", context = context, modifier = Modifier.weight(1f))
                 }
 
                 Spacer(modifier = Modifier.height(20.dp))
@@ -657,10 +658,11 @@ fun SocialButton(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     url: String,
-    context: Context
+    context: Context,
+    modifier: Modifier = Modifier
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(6.dp))
             .background(FluentTheme.colors.surfaceBg)
             .border(1.dp, FluentTheme.colors.panelBorder, RoundedCornerShape(6.dp))
@@ -670,12 +672,19 @@ fun SocialButton(
                     context.startActivity(intent)
                 } catch (_: Exception) {}
             }
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = label, tint = FluentTheme.colors.accent, modifier = Modifier.size(16.dp))
         Spacer(modifier = Modifier.width(4.dp))
-        Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = FluentTheme.colors.textColor)
+        Text(
+            label,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = FluentTheme.colors.textColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

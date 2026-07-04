@@ -21,6 +21,7 @@ class PreferencesManager(private val context: Context) {
         private val SORT_TYPE = stringPreferencesKey("sort_type")
         private val SORT_ASCENDING = booleanPreferencesKey("sort_ascending")
         private val USE_VIDEO_GRID = booleanPreferencesKey("use_video_grid")
+        private val USE_FAVORITES_GRID = booleanPreferencesKey("use_favorites_grid")
         private val USE_IMAGE_ALBUMS = booleanPreferencesKey("use_image_albums")
         private val IMAGE_SORT_TYPE = stringPreferencesKey("image_sort_type")
         private val IMAGE_SORT_ASCENDING = booleanPreferencesKey("image_sort_ascending")
@@ -85,6 +86,16 @@ class PreferencesManager(private val context: Context) {
     suspend fun saveUseVideoGrid(grid: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[USE_VIDEO_GRID] = grid
+        }
+    }
+
+    val useFavoritesGridFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[USE_FAVORITES_GRID] ?: false
+    }
+
+    suspend fun saveUseFavoritesGrid(grid: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[USE_FAVORITES_GRID] = grid
         }
     }
 

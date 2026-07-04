@@ -143,12 +143,14 @@ fun SearchScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "OmniSearch",
                         fontSize = 32.sp,
                         fontWeight = FontWeight.Bold,
-                        color = FluentTheme.colors.textColor
+                        color = FluentTheme.colors.textColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     
                     if (status == ConnectionStatus.CONNECTED && indexStatus != null) {
@@ -160,10 +162,13 @@ fun SearchScreen(
                         Text(
                             text = statusLabel,
                             fontSize = 12.sp,
-                            color = if (indexStatus!!.indexing) FluentTheme.colors.accent else FluentTheme.colors.textMuted
+                            color = if (indexStatus!!.indexing) FluentTheme.colors.accent else FluentTheme.colors.textMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
+                Spacer(modifier = Modifier.width(10.dp))
 
                 // Header Action: Query server state and trigger duplicate scans
                 if (status == ConnectionStatus.CONNECTED) {
@@ -173,7 +178,7 @@ fun SearchScreen(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(38.dp)
+                                .size(36.dp)
                                 .clip(CircleShape)
                                 .background(FluentTheme.colors.surfaceBg)
                                 .border(1.dp, FluentTheme.colors.panelBorder, CircleShape)
@@ -194,7 +199,7 @@ fun SearchScreen(
 
                         Box(
                             modifier = Modifier
-                                .size(38.dp)
+                                .size(36.dp)
                                 .clip(CircleShape)
                                 .background(FluentTheme.colors.surfaceBg)
                                 .border(1.dp, FluentTheme.colors.panelBorder, CircleShape)
@@ -211,7 +216,7 @@ fun SearchScreen(
 
                         Box(
                             modifier = Modifier
-                                .size(38.dp)
+                                .size(36.dp)
                                 .clip(CircleShape)
                                 .background(FluentTheme.colors.surfaceBg)
                                 .border(1.dp, FluentTheme.colors.panelBorder, CircleShape)
@@ -1287,14 +1292,17 @@ fun DriveRowCard(
         border = androidx.compose.foundation.BorderStroke(1.dp, FluentTheme.colors.panelBorder),
         shape = RoundedCornerShape(FluentTheme.dims.surfaceRadius)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
                 Box(
                     modifier = Modifier
                         .size(40.dp)
@@ -1310,20 +1318,25 @@ fun DriveRowCard(
                     )
                 }
                 Spacer(modifier = Modifier.width(12.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Local Disk (${drive.letter}:)",
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
-                        color = FluentTheme.colors.textColor
+                        color = FluentTheme.colors.textColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = "Filesystem: ${drive.filesystem} | DriveType: ${drive.driveType}",
                         fontSize = 12.sp,
-                        color = FluentTheme.colors.textMuted
+                        color = FluentTheme.colors.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
+            Spacer(modifier = Modifier.width(10.dp))
 
             if (drive.isNtfs) {
                 Button(

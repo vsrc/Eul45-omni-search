@@ -236,6 +236,86 @@ private fun clampMediaOffset(offset: Offset, zoom: Float, width: Float, height: 
         return Offset(x = offset.x.coerceIn(-maxX, maxX), y = offset.y.coerceIn(-maxY, maxY))
 }
 
+private fun viewerImageCacheKey(file: File, variant: String): String =
+        "${file.absolutePath}:${file.lastModified()}:${file.length()}:$variant"
+
+private fun buildViewerImageRequest(
+        context: Context,
+        file: File,
+        width: Int,
+        height: Int,
+        variant: String,
+        placeholderKey: String? = null
+): coil.request.ImageRequest {
+        val safeWidth = width.coerceAtLeast(1)
+        val safeHeight = height.coerceAtLeast(1)
+        return coil.request.ImageRequest.Builder(context)
+                .data(file)
+                .size(safeWidth, safeHeight)
+                .precision(coil.size.Precision.INEXACT)
+                .allowHardware(true)
+                .crossfade(false)
+                .memoryCacheKey(viewerImageCacheKey(file, variant))
+                .diskCacheKey(viewerImageCacheKey(file, variant))
+                .apply {
+                        if (placeholderKey != null) {
+                                placeholderMemoryCacheKey(placeholderKey)
+                        }
+                }
+                .build()
+}
+
+private fun decodeFastViewerPlaceholder(file: File, maxWidth: Int, maxHeight: Int): Bitmap? {
+        val targetWidth = maxWidth.coerceIn(256, 1200)
+        val targetHeight = maxHeight.coerceIn(256, 1200)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                        return android.media.ThumbnailUtils.createImageThumbnail(
+                                file,
+                                android.util.Size(targetWidth, targetHeight),
+                                null
+                        )
+                } catch (_: Throwable) {}
+        } else {
+                try {
+                        @Suppress("DEPRECATION")
+                        android.media.ThumbnailUtils.createImageThumbnail(
+                                        file.absolutePath,
+                                        MediaStore.Images.Thumbnails.MINI_KIND
+                                )
+                                ?.let {
+                                        return it
+                                }
+                } catch (_: Throwable) {}
+        }
+
+        return try {
+                val bounds =
+                        android.graphics.BitmapFactory.Options().apply {
+                                inJustDecodeBounds = true
+                        }
+                android.graphics.BitmapFactory.decodeFile(file.absolutePath, bounds)
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+                var sampleSize = 1
+                while (bounds.outWidth / sampleSize > targetWidth * 2 ||
+                                bounds.outHeight / sampleSize > targetHeight * 2
+                ) {
+                        sampleSize *= 2
+                }
+
+                val options =
+                        android.graphics.BitmapFactory.Options().apply {
+                                inSampleSize = sampleSize
+                                inPreferredConfig = Bitmap.Config.ARGB_8888
+                        }
+                android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+        } catch (_: Throwable) {
+                null
+        }
+}
+
 enum class FileSortType {
         NAME,
         DATE,
@@ -278,6 +358,7 @@ fun LocalExplorerScreen(
         val sortTypeState = prefsManager.sortTypeFlow.collectAsState(initial = "NAME")
         val sortAscendingState = prefsManager.sortAscendingFlow.collectAsState(initial = true)
         val useVideoGridState = prefsManager.useVideoGridFlow.collectAsState(initial = false)
+        val useFavoritesGridState = prefsManager.useFavoritesGridFlow.collectAsState(initial = false)
         val useImageAlbumsState = prefsManager.useImageAlbumsFlow.collectAsState(initial = true)
         val imageSortTypeState = prefsManager.imageSortTypeFlow.collectAsState(initial = "DATE")
         val imageSortAscendingState =
@@ -294,6 +375,7 @@ fun LocalExplorerScreen(
                 }
         val sortAscending = sortAscendingState.value
         val useVideoGrid = useVideoGridState.value
+        val useFavoritesGrid = useFavoritesGridState.value
         val useImageAlbums = useImageAlbumsState.value
         val imageSortType =
                 remember(imageSortTypeState.value) {
@@ -1381,6 +1463,15 @@ fun LocalExplorerScreen(
                                                         prefsManager.saveUseVideoGrid(!useVideoGrid)
                                                 }
                                         },
+                                        isFavoritesView = currentView == ExplorerView.FAVORITES,
+                                        useFavoritesGrid = useFavoritesGrid,
+                                        onToggleFavoritesGrid = {
+                                                coroutineScope.launch {
+                                                        prefsManager.saveUseFavoritesGrid(
+                                                                !useFavoritesGrid
+                                                        )
+                                                }
+                                        },
                                         isImageCategory = isImagesCategory,
                                         useImageAlbums = useImageAlbums,
                                         onToggleImageAlbums = {
@@ -1999,9 +2090,33 @@ fun LocalExplorerScreen(
                                                                                 selectedFiles
                                                                                         .clear()
                                                                 },
+                                                                useGrid = useFavoritesGrid,
                                                                 isLoading = isLoading,
                                                                 onFileClick = { file ->
-                                                                        if (file.isDirectory) {
+                                                                        if (isMultiSelectMode) {
+                                                                                if (selectedFiles
+                                                                                                .contains(
+                                                                                                        file
+                                                                                                )
+                                                                                ) {
+                                                                                        selectedFiles
+                                                                                                .remove(
+                                                                                                        file
+                                                                                                )
+                                                                                        if (selectedFiles
+                                                                                                        .isEmpty()
+                                                                                        )
+                                                                                                isMultiSelectMode =
+                                                                                                        false
+                                                                                } else {
+                                                                                        selectedFiles
+                                                                                                .add(
+                                                                                                        file
+                                                                                                )
+                                                                                }
+                                                                        } else if (file
+                                                                                        .isDirectory
+                                                                        ) {
                                                                                 searchQuery = ""
                                                                                 directoryFiles =
                                                                                         emptyList()
@@ -2038,7 +2153,17 @@ fun LocalExplorerScreen(
                                                                                 )
                                                                         }
                                                                 },
-                                                                onFileLongClick = {},
+                                                                onFileLongClick = { file ->
+                                                                        if (!isMultiSelectMode
+                                                                        ) {
+                                                                                isMultiSelectMode =
+                                                                                        true
+                                                                                selectedFiles
+                                                                                        .add(
+                                                                                                file
+                                                                                        )
+                                                                        }
+                                                                },
                                                                 isFavorited = { true },
                                                                 onToggleFavorite = {
                                                                         toggleFavorite(it)
@@ -3373,7 +3498,11 @@ fun LocalExplorerScreen(
                                                                                                                 )
                                                                                                         }
                                                                                                 )
-                                                                                                DropdownMenuItem(
+                                                                                                if (currentView !=
+                                                                                                                ExplorerView
+                                                                                                                        .FAVORITES
+                                                                                                ) {
+                                                                                                        DropdownMenuItem(
                                                                                                         text = {
                                                                                                                 Row(
                                                                                                                         verticalAlignment =
@@ -3418,7 +3547,8 @@ fun LocalExplorerScreen(
                                                                                                                                 true
                                                                                                                 )
                                                                                                         }
-                                                                                                )
+                                                                                                        )
+                                                                                                }
                                                                                                 val anyNotFavorited =
                                                                                                         selectedFiles
                                                                                                                 .any {
@@ -3560,6 +3690,10 @@ fun LocalExplorerScreen(
                                                                         }
                                                                 } else {
                                                                         // Clipboard Paste Mode
+                                                                        val canPasteHere =
+                                                                                currentView ==
+                                                                                        ExplorerView
+                                                                                                .DIRECTORY
                                                                         Text(
                                                                                 text =
                                                                                         "${copiedFiles.size} copied",
@@ -3598,8 +3732,12 @@ fun LocalExplorerScreen(
                                                                                 }
                                                                                 Button(
                                                                                         onClick = {
-                                                                                                pasteFiles()
+                                                                                                if (canPasteHere) {
+                                                                                                        pasteFiles()
+                                                                                                }
                                                                                         },
+                                                                                        enabled =
+                                                                                                canPasteHere,
                                                                                         colors =
                                                                                                 ButtonDefaults
                                                                                                         .buttonColors(
@@ -4066,6 +4204,9 @@ fun ExplorerHeader(
         isVideoCategory: Boolean = false,
         useVideoGrid: Boolean = false,
         onToggleVideoGrid: () -> Unit = {},
+        isFavoritesView: Boolean = false,
+        useFavoritesGrid: Boolean = false,
+        onToggleFavoritesGrid: () -> Unit = {},
         isImageCategory: Boolean = false,
         useImageAlbums: Boolean = true,
         onToggleImageAlbums: () -> Unit = {},
@@ -4441,6 +4582,62 @@ fun ExplorerHeader(
                                                                 },
                                                                 onClick = {
                                                                         onToggleVideoGrid()
+                                                                        showMenu = false
+                                                                }
+                                                        )
+                                                        Divider(
+                                                                color =
+                                                                        FluentTheme.colors
+                                                                                .panelBorder
+                                                        )
+                                                }
+
+                                                if (isFavoritesView) {
+                                                        DropdownMenuItem(
+                                                                text = {
+                                                                        Row(
+                                                                                verticalAlignment =
+                                                                                        Alignment
+                                                                                                .CenterVertically
+                                                                        ) {
+                                                                                Icon(
+                                                                                        imageVector =
+                                                                                                if (useFavoritesGrid)
+                                                                                                        Icons.Default
+                                                                                                                .ViewList
+                                                                                                else
+                                                                                                        Icons.Default
+                                                                                                                .GridView,
+                                                                                        contentDescription =
+                                                                                                null,
+                                                                                        tint =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .accent,
+                                                                                        modifier =
+                                                                                                Modifier.size(
+                                                                                                        18.dp
+                                                                                                )
+                                                                                )
+                                                                                Spacer(
+                                                                                        modifier =
+                                                                                                Modifier.width(
+                                                                                                        8.dp
+                                                                                                )
+                                                                                )
+                                                                                Text(
+                                                                                        if (useFavoritesGrid)
+                                                                                                "List View"
+                                                                                        else "Grid View",
+                                                                                        color =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .textColor
+                                                                                )
+                                                                        }
+                                                                },
+                                                                onClick = {
+                                                                        onToggleFavoritesGrid()
                                                                         showMenu = false
                                                                 }
                                                         )
@@ -5947,7 +6144,7 @@ private fun ImageAlbumsGrid(
 @Composable
 fun DirectoryViewer(
         files: List<File>,
-        selectedFiles: List<File>,
+        selectedFiles: MutableList<File>,
         isMultiSelectMode: Boolean,
         onToggleSelectMode: (Boolean) -> Unit,
         onFileClick: (File) -> Unit,
@@ -5962,6 +6159,7 @@ fun DirectoryViewer(
         onDetails: (File) -> Unit,
         onSendToDesktop: (File) -> Unit = {},
         isConnectedToDesktop: Boolean = false,
+        useGrid: Boolean = false,
         isLoading: Boolean = false
 ) {
         if (files.isEmpty()) {
@@ -5987,6 +6185,66 @@ fun DirectoryViewer(
                                         )
                                 }
                         }
+                }
+        } else if (useGrid) {
+                val gridState = rememberLazyGridState()
+                var suppressedGridClickPath by remember { mutableStateOf<String?>(null) }
+                Box(modifier = Modifier.fillMaxSize()) {
+                        LazyVerticalGrid(
+                                state = gridState,
+                                columns = GridCells.Adaptive(112.dp),
+                                contentPadding = PaddingValues(10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier =
+                                        Modifier.fillMaxSize()
+                                                .mediaGridDragSelection(
+                                                        files = files,
+                                                        gridState = gridState,
+                                                        selectedFiles = selectedFiles,
+                                                        onLongPressedItem = {
+                                                                suppressedGridClickPath =
+                                                                        it.absolutePath
+                                                        },
+                                                        onSelectionModeChange = onToggleSelectMode
+                                                )
+                        ) {
+                                items(files, key = { it.absolutePath }) { file ->
+                                        val isSelected = selectedFiles.contains(file)
+                                        LocalFileGridTile(
+                                                file = file,
+                                                isMultiSelectMode = isMultiSelectMode,
+                                                isSelected = isSelected,
+                                                onClick = {
+                                                        if (suppressedGridClickPath ==
+                                                                        file.absolutePath
+                                                        ) {
+                                                                suppressedGridClickPath = null
+                                                        } else {
+                                                                onFileClick(file)
+                                                        }
+                                                },
+                                                onLongClick = null,
+                                                isFavorited = isFavorited(file),
+                                                onToggleFavorite = { onToggleFavorite(file) },
+                                                onRename = { onRename(file) },
+                                                onDelete = { onDelete(file) },
+                                                onCompress = { onCompress(file) },
+                                                onExtract = { onExtract(file) },
+                                                onShare = { onShare(file) },
+                                                onDetails = { onDetails(file) },
+                                                onSendToDesktop =
+                                                        if (file.isFile) {
+                                                                { onSendToDesktop(file) }
+                                                        } else null,
+                                                isConnectedToDesktop = isConnectedToDesktop
+                                        )
+                                }
+                        }
+                        FastScrollbarGrid(
+                                gridState = gridState,
+                                modifier = Modifier.align(Alignment.CenterEnd)
+                        )
                 }
         } else {
                 val listState = rememberLazyListState()
@@ -6021,6 +6279,333 @@ fun DirectoryViewer(
                                 modifier = Modifier.align(Alignment.CenterEnd)
                         )
                 }
+        }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun LocalFileGridTile(
+        file: File,
+        isMultiSelectMode: Boolean,
+        isSelected: Boolean,
+        onClick: () -> Unit,
+        onLongClick: (() -> Unit)?,
+        isFavorited: Boolean,
+        onToggleFavorite: (() -> Unit)?,
+        onRename: (() -> Unit)?,
+        onDelete: (() -> Unit)?,
+        onCompress: (() -> Unit)?,
+        onExtract: (() -> Unit)?,
+        onShare: (() -> Unit)?,
+        onDetails: (() -> Unit)?,
+        onSendToDesktop: (() -> Unit)? = null,
+        isConnectedToDesktop: Boolean = false
+) {
+        val iconInfo = remember(file) { getFileIcon(file) }
+        val isImage =
+                file.extension.lowercase() in listOf("jpg", "jpeg", "png", "webp", "gif") &&
+                        !file.isDirectory
+        val isVideo =
+                file.extension.lowercase() in listOf("mp4", "mkv", "avi", "mov", "webm", "3gp") &&
+                        !file.isDirectory
+        var showOptions by remember { mutableStateOf(false) }
+
+        Column(
+                modifier =
+                        Modifier.fillMaxWidth()
+                                .clip(RoundedCornerShape(FluentTheme.dims.surfaceRadius))
+                                .background(
+                                        if (isSelected)
+                                                FluentTheme.colors.accent.copy(alpha = 0.12f)
+                                        else FluentTheme.colors.surfaceBg
+                                )
+                                .border(
+                                        if (isSelected) 2.dp else 1.dp,
+                                        if (isSelected) FluentTheme.colors.accent
+                                        else FluentTheme.colors.panelBorder,
+                                        RoundedCornerShape(FluentTheme.dims.surfaceRadius)
+                                )
+                                .combinedClickable(
+                                        onClick = onClick,
+                                        onLongClick = onLongClick
+                                )
+                                .padding(8.dp)
+        ) {
+                Box(
+                        modifier =
+                                Modifier.fillMaxWidth()
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(FluentTheme.colors.panelBorder.copy(alpha = 0.55f)),
+                        contentAlignment = Alignment.Center
+                ) {
+                        when {
+                                isImage -> {
+                                        AsyncImage(
+                                                model = file,
+                                                contentDescription = file.name,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                        )
+                                }
+                                isVideo -> {
+                                        var videoThumb by
+                                                remember(file) {
+                                                        mutableStateOf<android.graphics.Bitmap?>(
+                                                                VideoThumbnailCache.get(
+                                                                        file.absolutePath
+                                                                )
+                                                        )
+                                                }
+                                        var thumbLoaded by
+                                                remember(file) {
+                                                        mutableStateOf(videoThumb != null)
+                                                }
+                                        LaunchedEffect(file) {
+                                                if (videoThumb == null) {
+                                                        withContext(Dispatchers.IO) {
+                                                                videoThumb =
+                                                                        VideoThumbnailCache
+                                                                                .getOrCreate(
+                                                                                        file = file,
+                                                                                        size =
+                                                                                                android.util
+                                                                                                        .Size(
+                                                                                                                240,
+                                                                                                                180
+                                                                                                        ),
+                                                                                        isMicro =
+                                                                                                false
+                                                                                )
+                                                        }
+                                                        thumbLoaded = true
+                                                }
+                                        }
+                                        if (videoThumb != null) {
+                                                Image(
+                                                        bitmap = videoThumb!!.asImageBitmap(),
+                                                        contentDescription = file.name,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier.fillMaxSize()
+                                                )
+                                        } else {
+                                                val thumbnailBackgroundModifier =
+                                                        if (thumbLoaded) {
+                                                                Modifier.background(
+                                                                        FluentTheme.colors
+                                                                                .panelBorder
+                                                                )
+                                                        } else {
+                                                                Modifier.background(shimmerBrush())
+                                                        }
+                                                Box(
+                                                        modifier =
+                                                                Modifier.fillMaxSize()
+                                                                        .then(
+                                                                                thumbnailBackgroundModifier
+                                                                        ),
+                                                        contentAlignment = Alignment.Center
+                                                ) {
+                                                        Icon(
+                                                                imageVector =
+                                                                        Icons.Default.PlayCircle,
+                                                                contentDescription = null,
+                                                                tint =
+                                                                        FluentTheme.colors.accent,
+                                                                modifier = Modifier.size(34.dp)
+                                                        )
+                                                }
+                                        }
+                                        Box(
+                                                modifier =
+                                                        Modifier.align(Alignment.Center)
+                                                                .clip(CircleShape)
+                                                                .background(
+                                                                        Color.Black.copy(
+                                                                                alpha = 0.42f
+                                                                        )
+                                                                )
+                                                                .padding(6.dp)
+                                        ) {
+                                                Icon(
+                                                        imageVector = Icons.Default.PlayArrow,
+                                                        contentDescription = null,
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(20.dp)
+                                                )
+                                        }
+                                }
+                                else -> {
+                                        Icon(
+                                                imageVector = iconInfo.first,
+                                                contentDescription = null,
+                                                tint = iconInfo.second,
+                                                modifier =
+                                                        Modifier.size(
+                                                                if (file.isDirectory) 36.dp else 32.dp
+                                                        )
+                                        )
+                                }
+                        }
+
+                        if (isMultiSelectMode) {
+                                Checkbox(
+                                        checked = isSelected,
+                                        onCheckedChange = { onClick() },
+                                        colors =
+                                                CheckboxDefaults.colors(
+                                                        checkedColor = FluentTheme.colors.accent
+                                                ),
+                                        modifier =
+                                                Modifier.align(Alignment.TopEnd)
+                                                        .padding(2.dp)
+                                )
+                        } else if (onToggleFavorite != null) {
+                                Box(
+                                        modifier =
+                                                Modifier.align(Alignment.TopEnd)
+                                                        .clip(CircleShape)
+                                                        .background(Color.Black.copy(alpha = 0.28f))
+                                                        .clickable { showOptions = true }
+                                                        .padding(4.dp)
+                                ) {
+                                        Icon(
+                                                Icons.Default.MoreVert,
+                                                contentDescription = "Menu",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(16.dp)
+                                        )
+                                }
+                        }
+
+                        DropdownMenu(
+                                expanded = showOptions,
+                                onDismissRequest = { showOptions = false },
+                                modifier = Modifier.background(FluentTheme.colors.pageBg)
+                        ) {
+                                DropdownMenuItem(
+                                        text = {
+                                                Text(
+                                                        if (isFavorited) "Unfavorite" else "Favorite",
+                                                        color = FluentTheme.colors.textColor
+                                                )
+                                        },
+                                        leadingIcon = {
+                                                Icon(
+                                                        if (isFavorited) Icons.Filled.Star
+                                                        else Icons.Outlined.StarBorder,
+                                                        contentDescription = null,
+                                                        tint =
+                                                                if (isFavorited) Color(0xFFFFC107)
+                                                                else FluentTheme.colors.textColor
+                                                )
+                                        },
+                                        onClick = {
+                                                onToggleFavorite?.invoke()
+                                                showOptions = false
+                                        }
+                                )
+                                onRename?.let {
+                                        DropdownMenuItem(
+                                                text = {
+                                                        Text("Rename", color = FluentTheme.colors.textColor)
+                                                },
+                                                onClick = {
+                                                        it()
+                                                        showOptions = false
+                                                }
+                                        )
+                                }
+                                onShare?.let {
+                                        DropdownMenuItem(
+                                                text = {
+                                                        Text("Share", color = FluentTheme.colors.textColor)
+                                                },
+                                                onClick = {
+                                                        it()
+                                                        showOptions = false
+                                                }
+                                        )
+                                }
+                                if (isConnectedToDesktop && onSendToDesktop != null) {
+                                        DropdownMenuItem(
+                                                text = {
+                                                        Text(
+                                                                "Send to Desktop",
+                                                                color = FluentTheme.colors.textColor
+                                                        )
+                                                },
+                                                onClick = {
+                                                        onSendToDesktop()
+                                                        showOptions = false
+                                                }
+                                        )
+                                }
+                                if (file.extension.lowercase() == "zip" && onExtract != null) {
+                                        DropdownMenuItem(
+                                                text = {
+                                                        Text("Extract", color = FluentTheme.colors.textColor)
+                                                },
+                                                onClick = {
+                                                        onExtract()
+                                                        showOptions = false
+                                                }
+                                        )
+                                }
+                                onCompress?.let {
+                                        DropdownMenuItem(
+                                                text = {
+                                                        Text("Compress", color = FluentTheme.colors.textColor)
+                                                },
+                                                onClick = {
+                                                        it()
+                                                        showOptions = false
+                                                }
+                                        )
+                                }
+                                onDetails?.let {
+                                        DropdownMenuItem(
+                                                text = {
+                                                        Text("Details", color = FluentTheme.colors.textColor)
+                                                },
+                                                onClick = {
+                                                        it()
+                                                        showOptions = false
+                                                }
+                                        )
+                                }
+                                onDelete?.let {
+                                        DropdownMenuItem(
+                                                text = { Text("Delete", color = Color(0xFFFF5252)) },
+                                                onClick = {
+                                                        it()
+                                                        showOptions = false
+                                                }
+                                        )
+                                }
+                        }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                        text = file.name,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = FluentTheme.colors.textColor,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        lineHeight = 15.sp
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                        text =
+                                if (file.isDirectory) "${file.listFiles()?.size ?: 0} items"
+                                else formatSize(file.length()),
+                        fontSize = 11.sp,
+                        color = FluentTheme.colors.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                )
         }
 }
 
@@ -9902,23 +10487,53 @@ fun FullScreenSwipeImageViewerDialog(
 
         LaunchedEffect(pagerState.currentPage, imageFiles) {
                 val currentPage = pagerState.currentPage
-                val pagesToWarm =
-                        (currentPage - 2..currentPage + 2).filter {
-                                it in imageFiles.indices
-                        }
-                pagesToWarm.forEach { index ->
+                val metrics = context.resources.displayMetrics
+                val previewWidth = metrics.widthPixels.coerceAtLeast(720)
+                val previewHeight = metrics.heightPixels.coerceAtLeast(720)
+                val nearbyPages =
+                        (currentPage - 1..currentPage + 1).filter { it in imageFiles.indices }
+
+                nearbyPages.forEach { index ->
                         val warmFile = imageFiles[index]
-                        val request =
-                                coil.request.ImageRequest.Builder(context)
-                                        .data(warmFile)
-                                        .size(4096, 4096)
-                                        .precision(coil.size.Precision.INEXACT)
-                                        .allowHardware(true)
-                                        .memoryCacheKey("${warmFile.absolutePath}:preview")
-                                        .diskCacheKey("${warmFile.absolutePath}:preview")
-                                        .build()
-                        context.imageLoader.enqueue(request)
+                        context.imageLoader.enqueue(
+                                buildViewerImageRequest(
+                                        context = context,
+                                        file = warmFile,
+                                        width = previewWidth,
+                                        height = previewHeight,
+                                        variant = "viewer-preview-${previewWidth}x$previewHeight"
+                                )
+                        )
                 }
+
+                delay(180)
+                imageFiles.getOrNull(currentPage)?.let { currentFile ->
+                        context.imageLoader.enqueue(
+                                buildViewerImageRequest(
+                                        context = context,
+                                        file = currentFile,
+                                        width = 4096,
+                                        height = 4096,
+                                        variant = "viewer-full-4096"
+                                )
+                        )
+                }
+
+                delay(320)
+                nearbyPages
+                        .filter { it != currentPage }
+                        .forEach { index ->
+                                val warmFile = imageFiles[index]
+                                context.imageLoader.enqueue(
+                                        buildViewerImageRequest(
+                                                context = context,
+                                                file = warmFile,
+                                                width = 4096,
+                                                height = 4096,
+                                                variant = "viewer-full-4096"
+                                        )
+                                )
+                        }
         }
 
         LaunchedEffect(isCropMode) {
@@ -10096,6 +10711,56 @@ fun FullScreenSwipeImageViewerDialog(
                                                                         1f
                                                                 }
                                                         }
+                                                val previewWidth =
+                                                        constraints.maxWidth.coerceAtLeast(720)
+                                                val previewHeight =
+                                                        constraints.maxHeight.coerceAtLeast(720)
+                                                val previewVariant =
+                                                        "viewer-preview-${previewWidth}x$previewHeight"
+                                                val fullVariant = "viewer-full-4096"
+                                                val previewCacheKey =
+                                                        viewerImageCacheKey(file, previewVariant)
+                                                val quickPreviewBitmap by
+                                                        produceState<Bitmap?>(
+                                                                initialValue = null,
+                                                                key1 = file,
+                                                                key2 = previewWidth,
+                                                                key3 = previewHeight
+                                                        ) {
+                                                                value =
+                                                                        withContext(
+                                                                                Dispatchers.IO
+                                                                        ) {
+                                                                                decodeFastViewerPlaceholder(
+                                                                                        file,
+                                                                                        previewWidth,
+                                                                                        previewHeight
+                                                                                )
+                                                                        }
+                                                        }
+                                                var useFullQuality by remember(file) {
+                                                        mutableStateOf(false)
+                                                }
+                                                var displayedImageReady by remember(file) {
+                                                        mutableStateOf(false)
+                                                }
+
+                                                LaunchedEffect(file, page, pagerState.currentPage) {
+                                                        useFullQuality = false
+                                                        displayedImageReady = false
+                                                        if (page == pagerState.currentPage) {
+                                                                delay(160)
+                                                                useFullQuality = true
+                                                        }
+                                                }
+
+                                                LaunchedEffect(scale, page, pagerState.currentPage) {
+                                                        if (page == pagerState.currentPage &&
+                                                                        scale > 1.05f
+                                                        ) {
+                                                                useFullQuality = true
+                                                        }
+                                                }
 
                                                 Box(
                                                         modifier =
@@ -10160,35 +10825,78 @@ fun FullScreenSwipeImageViewerDialog(
                                                                         },
                                                         contentAlignment = Alignment.Center
                                                 ) {
+                                                        if (!displayedImageReady) {
+                                                                quickPreviewBitmap?.let {
+                                                                        placeholder ->
+                                                                        Image(
+                                                                                bitmap =
+                                                                                        placeholder
+                                                                                                .asImageBitmap(),
+                                                                                contentDescription =
+                                                                                        null,
+                                                                                contentScale =
+                                                                                        ContentScale
+                                                                                                .Fit,
+                                                                                modifier =
+                                                                                        Modifier
+                                                                                                .fillMaxSize()
+                                                                                                .graphicsLayer(
+                                                                                                        scaleX =
+                                                                                                                scale *
+                                                                                                                        autoFitScale,
+                                                                                                        scaleY =
+                                                                                                                scale *
+                                                                                                                        autoFitScale,
+                                                                                                        translationX =
+                                                                                                                offset.x,
+                                                                                                        translationY =
+                                                                                                                offset.y,
+                                                                                                        rotationZ =
+                                                                                                                rotation
+                                                                                                )
+                                                                        )
+                                                                }
+                                                        }
                                                         AsyncImage(
                                                                 model =
-                                                                        coil.request.ImageRequest
-                                                                                .Builder(
-                                                                                        LocalContext
-                                                                                                .current
+                                                                        if (useFullQuality) {
+                                                                                buildViewerImageRequest(
+                                                                                        context =
+                                                                                                context,
+                                                                                        file = file,
+                                                                                        width =
+                                                                                                4096,
+                                                                                        height =
+                                                                                                4096,
+                                                                                        variant =
+                                                                                                fullVariant,
+                                                                                        placeholderKey =
+                                                                                                previewCacheKey
                                                                                 )
-                                                                                        .data(file)
-                                                                                .memoryCacheKey(
-                                                                                        "${file.absolutePath}:preview"
+                                                                        } else {
+                                                                                buildViewerImageRequest(
+                                                                                        context =
+                                                                                                context,
+                                                                                        file = file,
+                                                                                        width =
+                                                                                                previewWidth,
+                                                                                        height =
+                                                                                                previewHeight,
+                                                                                        variant =
+                                                                                                previewVariant
                                                                                 )
-                                                                                .diskCacheKey(
-                                                                                        "${file.absolutePath}:preview"
-                                                                                )
-                                                                                .size(
-                                                                                        4096,
-                                                                                        4096
-                                                                                )
-                                                                                .precision(
-                                                                                        coil.size
-                                                                                                .Precision
-                                                                                                .INEXACT
-                                                                                )
-                                                                                .allowHardware(
-                                                                                        true
-                                                                                )
-                                                                                .build(),
+                                                                        },
                                                                 contentDescription = file.name,
                                                                 contentScale = ContentScale.Fit,
+                                                                onLoading = {
+                                                                        displayedImageReady = false
+                                                                },
+                                                                onSuccess = {
+                                                                        displayedImageReady = true
+                                                                },
+                                                                onError = {
+                                                                        displayedImageReady = false
+                                                                },
                                                                 modifier =
                                                                         Modifier.fillMaxSize()
                                                                                 .graphicsLayer(
