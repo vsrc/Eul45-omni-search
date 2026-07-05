@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -25,6 +26,8 @@ import android.view.WindowManager
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
@@ -84,6 +87,7 @@ import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -331,6 +335,20 @@ private data class ImageAlbum(
         val lastModified: Long
 )
 
+private enum class AlbumPinMode {
+        SET_NEW_FOR_LOCK,
+        UNLOCK,
+        CHANGE_VERIFY_CURRENT,
+        CHANGE_SET_NEW,
+        DISABLE_VERIFY,
+        REMOVE_LOCK_VERIFY
+}
+
+private data class AlbumPinRequest(
+        val mode: AlbumPinMode,
+        val album: ImageAlbum? = null
+)
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LocalExplorerScreen(
@@ -389,6 +407,7 @@ fun LocalExplorerScreen(
 
         var searchQuery by remember { mutableStateOf("") }
         var selectedImageAlbum by remember { mutableStateOf<ImageAlbum?>(null) }
+        var selectedAlbumForActions by remember { mutableStateOf<ImageAlbum?>(null) }
 
         // Multi-select actions
         val selectedFiles = remember { mutableStateListOf<File>() }
@@ -403,6 +422,11 @@ fun LocalExplorerScreen(
         var showCompressDialog by remember { mutableStateOf<List<File>?>(null) }
         var showDetailsDialog by remember { mutableStateOf<File?>(null) }
         var filesToDelete by remember { mutableStateOf<List<File>?>(null) }
+        var showAlbumRenameDialog by remember { mutableStateOf<ImageAlbum?>(null) }
+        var showAlbumDetailsDialog by remember { mutableStateOf<ImageAlbum?>(null) }
+        var albumPinRequest by remember { mutableStateOf<AlbumPinRequest?>(null) }
+        var showAlbumBiometricEnablePrompt by remember { mutableStateOf(false) }
+        var albumLocksRevision by remember { mutableIntStateOf(0) }
 
         // Previews/Players state
         var previewPdfFile by remember { mutableStateOf<File?>(null) }
@@ -420,6 +444,34 @@ fun LocalExplorerScreen(
         }
         var categoryFilesList by remember { mutableStateOf<List<File>>(emptyList()) }
         var isLoading by remember { mutableStateOf(false) }
+        val albumSecurityPrefs =
+                remember {
+                        context.getSharedPreferences(
+                                "omnisearch_local_album_security",
+                                Context.MODE_PRIVATE
+                        )
+                }
+        val lockedAlbumPaths =
+                remember(albumLocksRevision) { loadLockedAlbumPaths(albumSecurityPrefs) }
+        val pinnedAlbumPaths =
+                remember(albumLocksRevision) { loadPinnedAlbumPaths(albumSecurityPrefs) }
+        val albumLockPin =
+                remember(albumLocksRevision) {
+                        albumSecurityPrefs.getString(ALBUM_LOCK_PIN_KEY, "") ?: ""
+                }
+        val isAlbumBiometricEnabled =
+                remember(albumLocksRevision) {
+                        albumSecurityPrefs.getBoolean(ALBUM_LOCK_BIOMETRIC_KEY, false)
+                }
+        val canUseAlbumBiometric =
+                remember {
+                        BiometricManager.from(context)
+                                .canAuthenticate(
+                                        BiometricManager.Authenticators.BIOMETRIC_STRONG
+                                ) == BiometricManager.BIOMETRIC_SUCCESS
+                }
+        val unlockedAlbumPaths = remember { mutableStateListOf<String>() }
+        val fragmentActivity = context as? FragmentActivity
 
         val initialStorages = remember {
                 val list = mutableListOf<StorageInfo>()
@@ -619,6 +671,14 @@ fun LocalExplorerScreen(
                 isLoading = false
         }
 
+        fun isInLockedAlbum(file: File, lockedPaths: Set<String> = lockedAlbumPaths): Boolean =
+                file.parentFile?.absolutePath?.let { lockedPaths.contains(it) } == true
+
+        fun withoutLockedAlbumFiles(
+                files: List<File>,
+                lockedPaths: Set<String> = lockedAlbumPaths
+        ): List<File> = files.filterNot { it.isFile && isInLockedAlbum(it, lockedPaths) }
+
         fun loadFavorites() {
                 isLoading = true
                 val prefs =
@@ -632,7 +692,7 @@ fun LocalExplorerScreen(
                         val list = mutableListOf<File>()
                         for (i in 0 until arr.length()) {
                                 val f = File(arr.getString(i))
-                                if (f.exists()) list.add(f)
+                                if (f.exists() && !isInLockedAlbum(f)) list.add(f)
                         }
                         favoritesList = list
                 } catch (_: Exception) {}
@@ -679,6 +739,7 @@ fun LocalExplorerScreen(
         fun loadRecentFiles() {
                 if (!hasPermission) return
                 isLoading = true
+                val hiddenAlbumPaths = lockedAlbumPaths
                 coroutineScope.launch(Dispatchers.IO) {
                         val list = mutableListOf<File>()
                         try {
@@ -773,7 +834,8 @@ fun LocalExplorerScreen(
                                                 it.exists() &&
                                                         it.isFile &&
                                                         !it.name.startsWith(".") &&
-                                                        it.length() > 0
+                                                        it.length() > 0 &&
+                                                        !isInLockedAlbum(it, hiddenAlbumPaths)
                                         }
                                         .sortedByDescending { it.lastModified() }
                                         .take(15)
@@ -915,14 +977,19 @@ fun LocalExplorerScreen(
                                 !useImageAlbums
                 ) {
                         selectedImageAlbum = null
+                        selectedAlbumForActions = null
+                        unlockedAlbumPaths.clear()
                 }
         }
 
         val handleBackNavigation = {
-                if (isMultiSelectMode) {
+                if (selectedAlbumForActions != null) {
+                        selectedAlbumForActions = null
+                } else if (isMultiSelectMode) {
                         isMultiSelectMode = false
                         selectedFiles.clear()
                 } else if (selectedImageAlbum != null) {
+                        selectedImageAlbum?.directory?.absolutePath?.let { unlockedAlbumPaths.remove(it) }
                         selectedImageAlbum = null
                 } else {
                         searchQuery = "" // Reset search query when navigating back
@@ -1034,41 +1101,66 @@ fun LocalExplorerScreen(
                 isMoveOperation = isMove
                 selectedFiles.clear()
                 isMultiSelectMode = false
-                val actionText = if (isMove) "cut" else "copied"
-                Toast.makeText(context, "$count items $actionText to clipboard", Toast.LENGTH_SHORT)
-                        .show()
+                val actionText = if (isMove) "ready to move" else "copied"
+                Toast.makeText(context, "$count items $actionText", Toast.LENGTH_SHORT).show()
+        }
+
+        fun currentPasteTargetDirectory(): File? =
+                when {
+                        currentView == ExplorerView.DIRECTORY -> currentDirectory
+                        currentView == ExplorerView.CATEGORY &&
+                                currentCategoryName == "Images" &&
+                                selectedImageAlbum != null -> selectedImageAlbum?.directory
+                        else -> null
+                }
+
+        fun moveFileOrDirectory(srcFile: File, destFile: File): Boolean {
+                if (srcFile.absolutePath == destFile.absolutePath) return false
+                destFile.parentFile?.mkdirs()
+                if (destFile.exists()) {
+                        if (destFile.isDirectory) {
+                                destFile.deleteRecursively()
+                        } else {
+                                destFile.delete()
+                        }
+                }
+                if (srcFile.renameTo(destFile)) return !srcFile.exists() && destFile.exists()
+                return try {
+                        val copied =
+                                if (srcFile.isDirectory) {
+                                        srcFile.copyRecursively(destFile, overwrite = true)
+                                } else {
+                                        srcFile.copyTo(destFile, overwrite = true).exists()
+                                }
+                        if (!copied || !destFile.exists()) return false
+                        val removed =
+                                if (srcFile.isDirectory) srcFile.deleteRecursively()
+                                else srcFile.delete()
+                        removed && !srcFile.exists()
+                } catch (e: Exception) {
+                        Log.e("Explorer", "Move failed", e)
+                        false
+                }
         }
 
         fun pasteFiles() {
                 if (copiedFiles.isEmpty()) return
+                val targetDirectory = currentPasteTargetDirectory() ?: return
                 coroutineScope.launch(Dispatchers.IO) {
                         var count = 0
-                        copiedFiles.forEach { srcFile ->
-                                val destFile = File(currentDirectory, srcFile.name)
+                        var failed = 0
+                        copiedFiles.toList().forEach { srcFile ->
+                                val destFile = File(targetDirectory, srcFile.name)
                                 try {
                                         val success =
                                                 if (isMoveOperation) {
-                                                        if (srcFile.renameTo(destFile)) {
-                                                                true
-                                                        } else {
-                                                                if (srcFile.isDirectory) {
-                                                                        srcFile.copyRecursively(
-                                                                                destFile,
-                                                                                overwrite = true
-                                                                        ) &&
-                                                                                srcFile.deleteRecursively()
-                                                                } else {
-                                                                        srcFile.copyTo(
-                                                                                        destFile,
-                                                                                        overwrite =
-                                                                                                true
-                                                                                )
-                                                                                .exists() &&
-                                                                                srcFile.delete()
-                                                                }
-                                                        }
+                                                        moveFileOrDirectory(srcFile, destFile)
                                                 } else {
-                                                        if (srcFile.isDirectory) {
+                                                        if (srcFile.absolutePath ==
+                                                                        destFile.absolutePath
+                                                        ) {
+                                                                false
+                                                        } else if (srcFile.isDirectory) {
                                                                 srcFile.copyRecursively(
                                                                         destFile,
                                                                         overwrite = true
@@ -1081,19 +1173,23 @@ fun LocalExplorerScreen(
                                                                         .exists()
                                                         }
                                                 }
-                                        if (success) count++
+                                        if (success) count++ else failed++
                                 } catch (e: Exception) {
                                         Log.e("Explorer", "Failed to paste file", e)
+                                        failed++
                                 }
                         }
                         withContext(Dispatchers.Main) {
+                                val action = if (isMoveOperation) "Moved" else "Copied"
+                                val suffix =
+                                        if (failed > 0) " ($failed failed)" else ""
                                 Toast.makeText(
                                                 context,
-                                                "Pasted $count items successfully",
+                                                "$action $count items$suffix",
                                                 Toast.LENGTH_SHORT
                                         )
                                         .show()
-                                if (isMoveOperation) copiedFiles.clear()
+                                if (isMoveOperation || count > 0) copiedFiles.clear()
                                 refreshDirectory()
                                 loadRecentFiles()
                                 loadCategoryFiles()
@@ -1343,6 +1439,149 @@ fun LocalExplorerScreen(
                         folders + files
                 } else {
                         (folders.reversed()) + (files.reversed())
+                }
+        }
+
+        fun albumFiles(album: ImageAlbum): List<File> =
+                categoryFilesList
+                        .filter {
+                                it.isFile &&
+                                        it.parentFile?.absolutePath ==
+                                                album.directory.absolutePath &&
+                                        (showHiddenFiles || !it.name.startsWith("."))
+                        }
+                        .let { files ->
+                                val comparator =
+                                        when (imageSortType) {
+                                                FileSortType.NAME ->
+                                                        compareBy<File> { it.name.lowercase() }
+                                                FileSortType.DATE -> compareBy { it.lastModified() }
+                                                FileSortType.SIZE -> compareBy { it.length() }
+                                                FileSortType.TYPE ->
+                                                        compareBy { it.extension.lowercase() }
+                                        }
+                                val sorted = files.sortedWith(comparator)
+                                if (imageSortAscending) sorted else sorted.reversed()
+                        }
+
+        fun clearAlbumSelection() {
+                selectedAlbumForActions = null
+        }
+
+        fun setAlbumLocked(album: ImageAlbum, locked: Boolean) {
+                val updated = lockedAlbumPaths.toMutableSet()
+                if (locked) {
+                        updated.add(album.directory.absolutePath)
+                } else {
+                        updated.remove(album.directory.absolutePath)
+                        unlockedAlbumPaths.remove(album.directory.absolutePath)
+                }
+                saveLockedAlbumPaths(albumSecurityPrefs, updated)
+                recentFilesList = withoutLockedAlbumFiles(recentFilesList, updated)
+                favoritesList = withoutLockedAlbumFiles(favoritesList, updated)
+                albumLocksRevision++
+        }
+
+        fun isAlbumLocked(album: ImageAlbum): Boolean =
+                lockedAlbumPaths.contains(album.directory.absolutePath)
+
+        fun isAlbumPinned(album: ImageAlbum): Boolean =
+                pinnedAlbumPaths.contains(album.directory.absolutePath)
+
+        fun setAlbumPinned(album: ImageAlbum, pinned: Boolean) {
+                val updated = pinnedAlbumPaths.toMutableSet()
+                if (pinned) {
+                        updated.add(album.directory.absolutePath)
+                } else {
+                        updated.remove(album.directory.absolutePath)
+                }
+                savePinnedAlbumPaths(albumSecurityPrefs, updated)
+                albumLocksRevision++
+        }
+
+        fun unlockAlbumForOpen(album: ImageAlbum) {
+                if (!unlockedAlbumPaths.contains(album.directory.absolutePath)) {
+                        unlockedAlbumPaths.add(album.directory.absolutePath)
+                }
+                selectedImageAlbum = album
+                selectedAlbumForActions = null
+                searchQuery = ""
+        }
+
+        fun requestAlbumUnlock(album: ImageAlbum) {
+                if (albumLockPin.isBlank()) {
+                        setAlbumLocked(album, false)
+                        unlockAlbumForOpen(album)
+                        return
+                }
+                if (isAlbumBiometricEnabled && canUseAlbumBiometric && fragmentActivity != null) {
+                        triggerAlbumBiometrics(
+                                activity = fragmentActivity,
+                                title = "Unlock ${album.name}",
+                                onSuccess = { unlockAlbumForOpen(album) },
+                                onError = {
+                                        albumPinRequest =
+                                                AlbumPinRequest(AlbumPinMode.UNLOCK, album)
+                                }
+                        )
+                } else {
+                        albumPinRequest = AlbumPinRequest(AlbumPinMode.UNLOCK, album)
+                }
+        }
+
+        fun openAlbum(album: ImageAlbum) {
+                if (isAlbumLocked(album) &&
+                                !unlockedAlbumPaths.contains(album.directory.absolutePath)
+                ) {
+                        requestAlbumUnlock(album)
+                } else {
+                        unlockAlbumForOpen(album)
+                }
+        }
+
+        fun lockAlbum(album: ImageAlbum) {
+                if (albumLockPin.isBlank()) {
+                        albumPinRequest = AlbumPinRequest(AlbumPinMode.SET_NEW_FOR_LOCK, album)
+                } else {
+                        setAlbumLocked(album, true)
+                        selectedAlbumForActions = null
+                        Toast.makeText(context, "Album locked", Toast.LENGTH_SHORT).show()
+                }
+        }
+
+        fun renameAlbum(album: ImageAlbum, newName: String) {
+                val cleaned = newName.trim()
+                if (cleaned.isBlank()) return
+                val destination = File(album.directory.parentFile, cleaned)
+                if (destination.exists()) {
+                        Toast.makeText(context, "An album with this name already exists", Toast.LENGTH_SHORT)
+                                .show()
+                        return
+                }
+                if (album.directory.renameTo(destination)) {
+                        val locked = lockedAlbumPaths.contains(album.directory.absolutePath)
+                        if (locked) {
+                                val updated = lockedAlbumPaths.toMutableSet()
+                                updated.remove(album.directory.absolutePath)
+                                updated.add(destination.absolutePath)
+                                saveLockedAlbumPaths(albumSecurityPrefs, updated)
+                                unlockedAlbumPaths.remove(album.directory.absolutePath)
+                        }
+                        val pinned = pinnedAlbumPaths.contains(album.directory.absolutePath)
+                        if (pinned) {
+                                val updated = pinnedAlbumPaths.toMutableSet()
+                                updated.remove(album.directory.absolutePath)
+                                updated.add(destination.absolutePath)
+                                savePinnedAlbumPaths(albumSecurityPrefs, updated)
+                        }
+                        if (locked || pinned) albumLocksRevision++
+                        selectedAlbumForActions = null
+                        selectedImageAlbum = null
+                        loadCategoryFiles()
+                        loadFavorites()
+                        Toast.makeText(context, "Album renamed", Toast.LENGTH_SHORT).show()
+                } else {
+                        Toast.makeText(context, "Album rename failed", Toast.LENGTH_SHORT).show()
                 }
         }
 
@@ -2233,7 +2472,8 @@ fun LocalExplorerScreen(
                                                                                 showHiddenFiles,
                                                                                 searchQuery,
                                                                                 imageSortType,
-                                                                                imageSortAscending
+                                                                                imageSortAscending,
+                                                                                albumLocksRevision
                                                                         ) {
                                                                                 val albums =
                                                                                         buildImageAlbums(
@@ -2250,11 +2490,25 @@ fun LocalExplorerScreen(
                                                                                                                                         true
                                                                                                                         )
                                                                                                 }
-                                                                                sortImageAlbums(
+                                                                                val sortedAlbums = sortImageAlbums(
                                                                                         albums,
                                                                                         imageSortType,
                                                                                         imageSortAscending
                                                                                 )
+                                                                                sortedAlbums
+                                                                                        .filter {
+                                                                                                pinnedAlbumPaths.contains(
+                                                                                                        it.directory
+                                                                                                                .absolutePath
+                                                                                                )
+                                                                                        } +
+                                                                                        sortedAlbums.filter {
+                                                                                                !pinnedAlbumPaths
+                                                                                                        .contains(
+                                                                                                                it.directory
+                                                                                                                        .absolutePath
+                                                                                                        )
+                                                                                        }
                                                                         }
                                                                 if (useImageAlbums &&
                                                                                 selectedImageAlbum ==
@@ -2269,11 +2523,31 @@ fun LocalExplorerScreen(
                                                                                         albumsGridState,
                                                                                 isLoading =
                                                                                         isLoading,
+                                                                                selectedAlbum =
+                                                                                        selectedAlbumForActions,
+                                                                                lockedAlbumPaths =
+                                                                                        lockedAlbumPaths,
+                                                                                pinnedAlbumPaths =
+                                                                                        pinnedAlbumPaths,
                                                                                 onAlbumClick = {
-                                                                                        selectedImageAlbum =
+                                                                                        if (selectedAlbumForActions !=
+                                                                                                        null
+                                                                                        ) {
+                                                                                                selectedAlbumForActions =
+                                                                                                        it
+                                                                                        } else {
+                                                                                                openAlbum(
+                                                                                                        it
+                                                                                                )
+                                                                                        }
+                                                                                },
+                                                                                onAlbumLongClick = {
+                                                                                        selectedFiles
+                                                                                                .clear()
+                                                                                        isMultiSelectMode =
+                                                                                                false
+                                                                                        selectedAlbumForActions =
                                                                                                 it
-                                                                                        searchQuery =
-                                                                                                ""
                                                                                 },
                                                                                 modifier =
                                                                                         Modifier
@@ -2294,7 +2568,9 @@ fun LocalExplorerScreen(
                                                                                                                         .absolutePath
                                                                                                 }
                                                                                         }
-                                                                                        ?: sorted
+                                                                                        ?: withoutLockedAlbumFiles(
+                                                                                                sorted
+                                                                                        )
                                                                 if (imageFiles.isEmpty()) {
                                                                         if (isLoading) {
                                                                                 PlaceholderImageGrid()
@@ -3160,7 +3436,8 @@ fun LocalExplorerScreen(
                                         // operations
                                         androidx.compose.animation.AnimatedVisibility(
                                                 visible =
-                                                        isMultiSelectMode ||
+                                                        selectedAlbumForActions != null ||
+                                                                isMultiSelectMode ||
                                                                 copiedFiles.isNotEmpty(),
                                                 enter =
                                                         slideInVertically(initialOffsetY = { it }) +
@@ -3198,7 +3475,611 @@ fun LocalExplorerScreen(
                                                                 verticalAlignment =
                                                                         Alignment.CenterVertically
                                                         ) {
-                                                                if (isMultiSelectMode) {
+                                                                val actionAlbum = selectedAlbumForActions
+                                                                if (actionAlbum != null) {
+                                                                        val filesInAlbum =
+                                                                                albumFiles(actionAlbum)
+                                                                        val albumIsLocked =
+                                                                                isAlbumLocked(actionAlbum)
+                                                                        val albumIsPinned =
+                                                                                isAlbumPinned(actionAlbum)
+                                                                        val albumCanAccess =
+                                                                                !albumIsLocked ||
+                                                                                        unlockedAlbumPaths
+                                                                                                .contains(
+                                                                                                        actionAlbum
+                                                                                                                .directory
+                                                                                                                .absolutePath
+                                                                                                )
+                                                                        Column(
+                                                                                verticalArrangement =
+                                                                                        Arrangement.Center,
+                                                                                modifier =
+                                                                                        Modifier.width(
+                                                                                                42.dp
+                                                                                        )
+                                                                        ) {
+                                                                                Text(
+                                                                                        text =
+                                                                                                filesInAlbum.size
+                                                                                                        .toString(),
+                                                                                        fontWeight =
+                                                                                                FontWeight.SemiBold,
+                                                                                        color =
+                                                                                                FluentTheme.colors
+                                                                                                        .textColor,
+                                                                                        fontSize = 13.sp,
+                                                                                        maxLines =
+                                                                                                1,
+                                                                                        overflow =
+                                                                                                TextOverflow.Ellipsis
+                                                                                )
+                                                                                Text(
+                                                                                        text = "selected",
+                                                                                        color =
+                                                                                                FluentTheme.colors
+                                                                                                        .accent,
+                                                                                        fontSize = 10.sp,
+                                                                                        fontWeight =
+                                                                                                FontWeight.Bold,
+                                                                                        maxLines = 1,
+                                                                                        overflow =
+                                                                                                TextOverflow.Clip
+                                                                                )
+                                                                        }
+                                                                        Row(
+                                                                                horizontalArrangement =
+                                                                                        Arrangement.spacedBy(
+                                                                                                8.dp
+                                                                                        ),
+                                                                                verticalAlignment =
+                                                                                        Alignment.CenterVertically
+                                                                        ) {
+                                                                                IconButton(
+                                                                                        modifier =
+                                                                                                Modifier.size(
+                                                                                                        40.dp
+                                                                                                ),
+                                                                                        onClick = {
+                                                                                                if (filesInAlbum
+                                                                                                                .isNotEmpty()
+                                                                                                ) {
+                                                                                                        shareFiles(
+                                                                                                                filesInAlbum
+                                                                                                        )
+                                                                                                }
+                                                                                        },
+                                                                                        enabled = albumCanAccess
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default.Share,
+                                                                                                contentDescription =
+                                                                                                        "Share album",
+                                                                                                tint =
+                                                                                                        FluentTheme.colors
+                                                                                                                .textColor
+                                                                                        )
+                                                                                }
+                                                                                IconButton(
+                                                                                        modifier =
+                                                                                                Modifier.size(
+                                                                                                        40.dp
+                                                                                                ),
+                                                                                        onClick = {
+                                                                                                val filesToSend =
+                                                                                                        filesInAlbum.filter {
+                                                                                                                it.isFile
+                                                                                                        }
+                                                                                                if (filesToSend
+                                                                                                                .isNotEmpty()
+                                                                                                ) {
+                                                                                                        syncViewModel
+                                                                                                                .sendFilesToDesktop(
+                                                                                                                        context,
+                                                                                                                        filesToSend
+                                                                                                                )
+                                                                                                        clearAlbumSelection()
+                                                                                                }
+                                                                                        },
+                                                                                        enabled =
+                                                                                                isConnectedToDesktop &&
+                                                                                                        albumCanAccess
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default.Computer,
+                                                                                                contentDescription =
+                                                                                                        "Send album to Desktop",
+                                                                                                tint =
+                                                                                                        if (isConnectedToDesktop)
+                                                                                                                FluentTheme.colors
+                                                                                                                        .accent
+                                                                                                        else
+                                                                                                                FluentTheme.colors
+                                                                                                                        .textMuted
+                                                                                                                        .copy(
+                                                                                                                                alpha =
+                                                                                                                                        0.4f
+                                                                                                                        )
+                                                                                        )
+                                                                                }
+                                                                                IconButton(
+                                                                                        modifier =
+                                                                                                Modifier.size(
+                                                                                                        40.dp
+                                                                                                ),
+                                                                                        onClick = {
+                                                                                                if (filesInAlbum
+                                                                                                                .isNotEmpty()
+                                                                                                ) {
+                                                                                                        deleteFiles(
+                                                                                                                filesInAlbum
+                                                                                                        )
+                                                                                                        clearAlbumSelection()
+                                                                                                }
+                                                                                        },
+                                                                                        enabled = albumCanAccess
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default.Delete,
+                                                                                                contentDescription =
+                                                                                                        "Delete album photos",
+                                                                                                tint =
+                                                                                                        FluentTheme.colors
+                                                                                                                .dangerText
+                                                                                        )
+                                                                                }
+                                                                                var showAlbumMoreMenu by
+                                                                                        remember {
+                                                                                                mutableStateOf(
+                                                                                                        false
+                                                                                                )
+                                                                                        }
+                                                                                Box {
+                                                                                        IconButton(
+                                                                                                modifier =
+                                                                                                        Modifier.size(
+                                                                                                                40.dp
+                                                                                                        ),
+                                                                                                onClick = {
+                                                                                                        showAlbumMoreMenu =
+                                                                                                                true
+                                                                                                }
+                                                                                        ) {
+                                                                                                Icon(
+                                                                                                        Icons.Default
+                                                                                                                .MoreVert,
+                                                                                                        contentDescription =
+                                                                                                                "Album options",
+                                                                                                        tint =
+                                                                                                                FluentTheme
+                                                                                                                        .colors
+                                                                                                                        .textColor
+                                                                                                )
+                                                                                        }
+                                                                                        DropdownMenu(
+                                                                                                expanded =
+                                                                                                        showAlbumMoreMenu,
+                                                                                                onDismissRequest = {
+                                                                                                        showAlbumMoreMenu =
+                                                                                                                false
+                                                                                                },
+                                                                                                modifier =
+                                                                                                        Modifier.background(
+                                                                                                                FluentTheme.colors
+                                                                                                                        .panelBg
+                                                                                                        )
+                                                                                        ) {
+                                                                                                DropdownMenuItem(
+                                                                                                        text = {
+                                                                                                                Text(
+                                                                                                                        if (albumIsPinned)
+                                                                                                                                "Unpin Album"
+                                                                                                                        else
+                                                                                                                                "Pin Album",
+                                                                                                                        color =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        leadingIcon = {
+                                                                                                                Icon(
+                                                                                                                        Icons.Default
+                                                                                                                                .PushPin,
+                                                                                                                        contentDescription =
+                                                                                                                                null,
+                                                                                                                        tint =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        onClick = {
+                                                                                                                showAlbumMoreMenu =
+                                                                                                                        false
+                                                                                                                setAlbumPinned(
+                                                                                                                        actionAlbum,
+                                                                                                                        !albumIsPinned
+                                                                                                                )
+                                                                                                                Toast.makeText(
+                                                                                                                                context,
+                                                                                                                                if (albumIsPinned)
+                                                                                                                                        "Album unpinned"
+                                                                                                                                else
+                                                                                                                                        "Album pinned",
+                                                                                                                                Toast.LENGTH_SHORT
+                                                                                                                        )
+                                                                                                                        .show()
+                                                                                                                clearAlbumSelection()
+                                                                                                        }
+                                                                                                )
+                                                                                                if (albumIsLocked &&
+                                                                                                                !albumCanAccess
+                                                                                                ) {
+                                                                                                        DropdownMenuItem(
+                                                                                                                text = {
+                                                                                                                        Text(
+                                                                                                                                "Unlock Album",
+                                                                                                                                color =
+                                                                                                                                        FluentTheme.colors
+                                                                                                                                                .textColor
+                                                                                                                        )
+                                                                                                                },
+                                                                                                                leadingIcon = {
+                                                                                                                        Icon(
+                                                                                                                                Icons.Default
+                                                                                                                                        .LockOpen,
+                                                                                                                                contentDescription =
+                                                                                                                                        null,
+                                                                                                                                tint =
+                                                                                                                                        FluentTheme.colors
+                                                                                                                                                .textColor
+                                                                                                                        )
+                                                                                                                },
+                                                                                                                onClick = {
+                                                                                                                        showAlbumMoreMenu =
+                                                                                                                                false
+                                                                                                                        requestAlbumUnlock(
+                                                                                                                                actionAlbum
+                                                                                                                        )
+                                                                                                                }
+                                                                                                        )
+                                                                                                }
+                                                                                                DropdownMenuItem(
+                                                                                                        text = {
+                                                                                                                Text(
+                                                                                                                        if (albumIsLocked)
+                                                                                                                                "Remove Album Lock"
+                                                                                                                        else
+                                                                                                                                "Lock Album",
+                                                                                                                        color =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        leadingIcon = {
+                                                                                                                Icon(
+                                                                                                                        if (albumIsLocked)
+                                                                                                                                Icons.Default
+                                                                                                                                        .LockOpen
+                                                                                                                        else
+                                                                                                                                Icons.Default
+                                                                                                                                        .Lock,
+                                                                                                                        contentDescription =
+                                                                                                                                null,
+                                                                                                                        tint =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        onClick = {
+                                                                                                                showAlbumMoreMenu =
+                                                                                                                        false
+                                                                                                                if (albumIsLocked) {
+                                                                                                                        albumPinRequest =
+                                                                                                                                AlbumPinRequest(
+                                                                                                                                        AlbumPinMode.REMOVE_LOCK_VERIFY,
+                                                                                                                                        actionAlbum
+                                                                                                                                )
+                                                                                                                } else {
+                                                                                                                        lockAlbum(
+                                                                                                                                actionAlbum
+                                                                                                                        )
+                                                                                                                }
+                                                                                                        }
+                                                                                                )
+                                                                                                if (albumLockPin.isNotBlank()) {
+                                                                                                        DropdownMenuItem(
+                                                                                                                text = {
+                                                                                                                        Text(
+                                                                                                                                "Change Album PIN",
+                                                                                                                                color =
+                                                                                                                                        FluentTheme.colors
+                                                                                                                                                .textColor
+                                                                                                                        )
+                                                                                                                },
+                                                                                                                leadingIcon = {
+                                                                                                                        Icon(
+                                                                                                                                Icons.Default
+                                                                                                                                        .Password,
+                                                                                                                                contentDescription =
+                                                                                                                                        null,
+                                                                                                                                tint =
+                                                                                                                                        FluentTheme.colors
+                                                                                                                                                .textColor
+                                                                                                                        )
+                                                                                                                },
+                                                                                                                onClick = {
+                                                                                                                        showAlbumMoreMenu =
+                                                                                                                                false
+                                                                                                                        albumPinRequest =
+                                                                                                                                AlbumPinRequest(
+                                                                                                                                        AlbumPinMode.CHANGE_VERIFY_CURRENT
+                                                                                                                                )
+                                                                                                                }
+                                                                                                        )
+                                                                                                        DropdownMenuItem(
+                                                                                                                text = {
+                                                                                                                        Text(
+                                                                                                                                "Disable Album Lock PIN",
+                                                                                                                                color =
+                                                                                                                                        FluentTheme.colors
+                                                                                                                                                .textColor
+                                                                                                                        )
+                                                                                                                },
+                                                                                                                leadingIcon = {
+                                                                                                                        Icon(
+                                                                                                                                Icons.Default
+                                                                                                                                        .NoEncryption,
+                                                                                                                                contentDescription =
+                                                                                                                                        null,
+                                                                                                                                tint =
+                                                                                                                                        FluentTheme.colors
+                                                                                                                                                .textColor
+                                                                                                                        )
+                                                                                                                },
+                                                                                                                onClick = {
+                                                                                                                        showAlbumMoreMenu =
+                                                                                                                                false
+                                                                                                                        albumPinRequest =
+                                                                                                                                AlbumPinRequest(
+                                                                                                                                        AlbumPinMode.DISABLE_VERIFY
+                                                                                                                                )
+                                                                                                                }
+                                                                                                        )
+                                                                                                }
+                                                                                                HorizontalDivider()
+                                                                                                DropdownMenuItem(
+                                                                                                        text = {
+                                                                                                                Text(
+                                                                                                                        "Copy Album Photos",
+                                                                                                                        color =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        leadingIcon = {
+                                                                                                                Icon(
+                                                                                                                        Icons.Default
+                                                                                                                                .ContentCopy,
+                                                                                                                        contentDescription =
+                                                                                                                                null,
+                                                                                                                        tint =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        onClick = {
+                                                                                                                showAlbumMoreMenu =
+                                                                                                                        false
+                                                                                                                copyOrMoveFiles(
+                                                                                                                        filesInAlbum,
+                                                                                                                        false
+                                                                                                                )
+                                                                                                                clearAlbumSelection()
+                                                                                                        },
+                                                                                                        enabled = albumCanAccess
+                                                                                                )
+                                                                                                DropdownMenuItem(
+                                                                                                        text = {
+                                                                                                                Text(
+                                                                                                                        "Move Album Photos To",
+                                                                                                                        color =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        leadingIcon = {
+                                                                                                                Icon(
+                                                                                                                        Icons.Default
+                                                                                                                                 .DriveFileMove,
+                                                                                                                        contentDescription =
+                                                                                                                                null,
+                                                                                                                        tint =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        onClick = {
+                                                                                                                showAlbumMoreMenu =
+                                                                                                                        false
+                                                                                                                copyOrMoveFiles(
+                                                                                                                        filesInAlbum,
+                                                                                                                        true
+                                                                                                                )
+                                                                                                                clearAlbumSelection()
+                                                                                                        },
+                                                                                                        enabled = albumCanAccess
+                                                                                                )
+                                                                                                val anyNotFavorited =
+                                                                                                        filesInAlbum.any {
+                                                                                                                !isFavorited(
+                                                                                                                        it
+                                                                                                                )
+                                                                                                        }
+                                                                                                DropdownMenuItem(
+                                                                                                        text = {
+                                                                                                                Text(
+                                                                                                                        if (anyNotFavorited)
+                                                                                                                                "Favorite Album Photos"
+                                                                                                                        else
+                                                                                                                                "Unfavorite Album Photos",
+                                                                                                                        color =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        leadingIcon = {
+                                                                                                                Icon(
+                                                                                                                        if (anyNotFavorited)
+                                                                                                                                Icons.Outlined
+                                                                                                                                        .StarBorder
+                                                                                                                        else
+                                                                                                                                Icons.Filled
+                                                                                                                                        .Star,
+                                                                                                                        contentDescription =
+                                                                                                                                null,
+                                                                                                                        tint =
+                                                                                                                                if (anyNotFavorited)
+                                                                                                                                        FluentTheme.colors
+                                                                                                                                                .textColor
+                                                                                                                                else
+                                                                                                                                        Color(
+                                                                                                                                                0xFFFFC107
+                                                                                                                                        )
+                                                                                                                )
+                                                                                                        },
+                                                                                                        onClick = {
+                                                                                                                showAlbumMoreMenu =
+                                                                                                                        false
+                                                                                                                filesInAlbum.forEach {
+                                                                                                                        file
+                                                                                                                        ->
+                                                                                                                        val fav =
+                                                                                                                                isFavorited(
+                                                                                                                                        file
+                                                                                                                                )
+                                                                                                                        if (anyNotFavorited &&
+                                                                                                                                        !fav
+                                                                                                                        ) {
+                                                                                                                                toggleFavorite(
+                                                                                                                                        file
+                                                                                                                                )
+                                                                                                                        } else if (!anyNotFavorited &&
+                                                                                                                                        fav
+                                                                                                                        ) {
+                                                                                                                                toggleFavorite(
+                                                                                                                                        file
+                                                                                                                                )
+                                                                                                                        }
+                                                                                                                }
+                                                                                                                clearAlbumSelection()
+                                                                                                        },
+                                                                                                        enabled = albumCanAccess
+                                                                                                )
+                                                                                                DropdownMenuItem(
+                                                                                                        text = {
+                                                                                                                Text(
+                                                                                                                        "Compress Album",
+                                                                                                                        color =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        leadingIcon = {
+                                                                                                                Icon(
+                                                                                                                        Icons.Default
+                                                                                                                                .Archive,
+                                                                                                                        contentDescription =
+                                                                                                                                null,
+                                                                                                                        tint =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        onClick = {
+                                                                                                                showAlbumMoreMenu =
+                                                                                                                        false
+                                                                                                                showCompressDialog =
+                                                                                                                        filesInAlbum
+                                                                                                                clearAlbumSelection()
+                                                                                                        },
+                                                                                                        enabled = albumCanAccess
+                                                                                                )
+                                                                                                DropdownMenuItem(
+                                                                                                        text = {
+                                                                                                                Text(
+                                                                                                                        "Rename Album",
+                                                                                                                        color =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        leadingIcon = {
+                                                                                                                Icon(
+                                                                                                                        Icons.Default.Edit,
+                                                                                                                        contentDescription =
+                                                                                                                                null,
+                                                                                                                        tint =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        onClick = {
+                                                                                                                showAlbumMoreMenu =
+                                                                                                                        false
+                                                                                                                showAlbumRenameDialog =
+                                                                                                                        actionAlbum
+                                                                                                        },
+                                                                                                        enabled = albumCanAccess
+                                                                                                )
+                                                                                                DropdownMenuItem(
+                                                                                                        text = {
+                                                                                                                Text(
+                                                                                                                        "Details",
+                                                                                                                        color =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        leadingIcon = {
+                                                                                                                Icon(
+                                                                                                                        Icons.Default.Info,
+                                                                                                                        contentDescription =
+                                                                                                                                null,
+                                                                                                                        tint =
+                                                                                                                                FluentTheme.colors
+                                                                                                                                        .textColor
+                                                                                                                )
+                                                                                                        },
+                                                                                                        onClick = {
+                                                                                                                showAlbumMoreMenu =
+                                                                                                                        false
+                                                                                                                showAlbumDetailsDialog =
+                                                                                                                        actionAlbum
+                                                                                                        },
+                                                                                                        enabled = albumCanAccess
+                                                                                                )
+                                                                                        }
+                                                                                }
+                                                                                IconButton(
+                                                                                        modifier =
+                                                                                                Modifier.size(
+                                                                                                        40.dp
+                                                                                                ),
+                                                                                        onClick = {
+                                                                                                clearAlbumSelection()
+                                                                                        }
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default.Close,
+                                                                                                contentDescription =
+                                                                                                        "Cancel album selection",
+                                                                                                tint =
+                                                                                                        FluentTheme.colors
+                                                                                                                .textMuted
+                                                                                        )
+                                                                                }
+                                                                        }
+                                                                } else if (isMultiSelectMode) {
                                                                         val visibleFiles =
                                                                                 when (currentView) {
                                                                                         ExplorerView
@@ -3511,7 +4392,7 @@ fun LocalExplorerScreen(
                                                                                                                 ) {
                                                                                                                         Icon(
                                                                                                                                 Icons.Default
-                                                                                                                                        .ContentCut,
+                                                                                                                                         .DriveFileMove,
                                                                                                                                 contentDescription =
                                                                                                                                         null,
                                                                                                                                 tint =
@@ -3530,7 +4411,7 @@ fun LocalExplorerScreen(
                                                                                                                                         )
                                                                                                                         )
                                                                                                                         Text(
-                                                                                                                                "Cut",
+                                                                                                                                 "Move To",
                                                                                                                                 color =
                                                                                                                                         FluentTheme
                                                                                                                                                 .colors
@@ -3690,13 +4571,16 @@ fun LocalExplorerScreen(
                                                                         }
                                                                 } else {
                                                                         // Clipboard Paste Mode
+                                                                        val pasteTarget =
+                                                                                currentPasteTargetDirectory()
                                                                         val canPasteHere =
-                                                                                currentView ==
-                                                                                        ExplorerView
-                                                                                                .DIRECTORY
+                                                                                pasteTarget != null
                                                                         Text(
                                                                                 text =
-                                                                                        "${copiedFiles.size} copied",
+                                                                                        if (isMoveOperation)
+                                                                                                "${copiedFiles.size} to move"
+                                                                                        else
+                                                                                                "${copiedFiles.size} copied",
                                                                                 fontWeight =
                                                                                         FontWeight
                                                                                                 .SemiBold,
@@ -3753,7 +4637,10 @@ fun LocalExplorerScreen(
                                                                                                 Icons.Default
                                                                                                         .ContentPaste,
                                                                                                 contentDescription =
-                                                                                                        "Paste",
+                                                                                                        if (isMoveOperation)
+                                                                                                                "Move Here"
+                                                                                                        else
+                                                                                                                "Paste",
                                                                                                 tint =
                                                                                                         FluentTheme
                                                                                                                 .colors
@@ -3770,7 +4657,10 @@ fun LocalExplorerScreen(
                                                                                                         )
                                                                                         )
                                                                                         Text(
-                                                                                                "Paste Here",
+                                                                                                if (isMoveOperation)
+                                                                                                        "Move Here"
+                                                                                                else
+                                                                                                        "Paste Here",
                                                                                                 color =
                                                                                                         FluentTheme
                                                                                                                 .colors
@@ -3794,7 +4684,8 @@ fun LocalExplorerScreen(
                                         Modifier.align(Alignment.BottomCenter)
                                                 .padding(
                                                         bottom =
-                                                                if (isMultiSelectMode ||
+                                                                if (selectedAlbumForActions != null ||
+                                                                                isMultiSelectMode ||
                                                                                 copiedFiles
                                                                                         .isNotEmpty()
                                                                 )
@@ -4108,6 +4999,290 @@ fun LocalExplorerScreen(
                         LocalFileDetailsDialog(
                                 file = showDetailsDialog!!,
                                 onDismiss = { showDetailsDialog = null }
+                        )
+                }
+
+                showAlbumRenameDialog?.let { album ->
+                        var renameText by remember(album.directory.absolutePath) {
+                                mutableStateOf(album.name)
+                        }
+                        AlertDialog(
+                                onDismissRequest = { showAlbumRenameDialog = null },
+                                title = { Text("Rename Album") },
+                                text = {
+                                        OutlinedTextField(
+                                                value = renameText,
+                                                onValueChange = { renameText = it },
+                                                label = { Text("Album Name") },
+                                                singleLine = true,
+                                                colors =
+                                                        OutlinedTextFieldDefaults.colors(
+                                                                focusedBorderColor =
+                                                                        FluentTheme.colors.accent,
+                                                                focusedLabelColor =
+                                                                        FluentTheme.colors.accent
+                                                        )
+                                        )
+                                },
+                                confirmButton = {
+                                        Button(
+                                                onClick = {
+                                                        renameAlbum(album, renameText)
+                                                        showAlbumRenameDialog = null
+                                                },
+                                                colors =
+                                                        ButtonDefaults.buttonColors(
+                                                                containerColor =
+                                                                        FluentTheme.colors.accent
+                                                        )
+                                        ) { Text("Rename", color = FluentTheme.colors.onAccent) }
+                                },
+                                dismissButton = {
+                                        TextButton(
+                                                onClick = { showAlbumRenameDialog = null }
+                                        ) {
+                                                Text("Cancel", color = FluentTheme.colors.textColor)
+                                        }
+                                },
+                                containerColor = FluentTheme.colors.pageBg
+                        )
+                }
+
+                showAlbumDetailsDialog?.let { album ->
+                        LocalAlbumDetailsDialog(
+                                album = album,
+                                files = albumFiles(album),
+                                locked = isAlbumLocked(album),
+                                onDismiss = { showAlbumDetailsDialog = null }
+                        )
+                }
+
+                albumPinRequest?.let { request ->
+                        val title =
+                                when (request.mode) {
+                                        AlbumPinMode.SET_NEW_FOR_LOCK -> "Set Album PIN"
+                                        AlbumPinMode.UNLOCK -> "Unlock Album"
+                                        AlbumPinMode.CHANGE_VERIFY_CURRENT -> "Verify Current PIN"
+                                        AlbumPinMode.CHANGE_SET_NEW -> "Set New Album PIN"
+                                        AlbumPinMode.DISABLE_VERIFY -> "Disable Album Lock PIN"
+                                        AlbumPinMode.REMOVE_LOCK_VERIFY -> "Remove Album Lock"
+                                }
+                        val subtitle =
+                                when (request.mode) {
+                                        AlbumPinMode.SET_NEW_FOR_LOCK,
+                                        AlbumPinMode.CHANGE_SET_NEW ->
+                                                "Choose a 4-digit code for locked albums"
+                                        AlbumPinMode.UNLOCK ->
+                                                "Enter your album PIN to open this album"
+                                        AlbumPinMode.REMOVE_LOCK_VERIFY ->
+                                                "Verify PIN to remove the lock from this album"
+                                        AlbumPinMode.DISABLE_VERIFY ->
+                                                "Verify PIN to remove all album locks"
+                                        AlbumPinMode.CHANGE_VERIFY_CURRENT ->
+                                                "Verify current PIN before changing it"
+                                }
+                        AlbumPinDialog(
+                                title = title,
+                                subtitle = subtitle,
+                                showBiometricButton =
+                                        request.mode == AlbumPinMode.UNLOCK &&
+                                                isAlbumBiometricEnabled &&
+                                                canUseAlbumBiometric &&
+                                                fragmentActivity != null,
+                                onBiometricClick = {
+                                        val album = request.album
+                                        if (album != null && fragmentActivity != null) {
+                                                triggerAlbumBiometrics(
+                                                        activity = fragmentActivity,
+                                                        title = "Unlock ${album.name}",
+                                                        onSuccess = {
+                                                                albumPinRequest = null
+                                                                unlockAlbumForOpen(album)
+                                                        },
+                                                        onError = {}
+                                                )
+                                        }
+                                },
+                                onDismiss = { albumPinRequest = null },
+                                onPinEntered = { pin ->
+                                        when (request.mode) {
+                                                AlbumPinMode.SET_NEW_FOR_LOCK -> {
+                                                        val album = request.album
+                                                        albumSecurityPrefs.edit()
+                                                                .putString(
+                                                                        ALBUM_LOCK_PIN_KEY,
+                                                                        pin
+                                                                )
+                                                                .apply()
+                                                        if (album != null) {
+                                                                setAlbumLocked(album, true)
+                                                        } else {
+                                                                albumLocksRevision++
+                                                        }
+                                                        selectedAlbumForActions = null
+                                                        albumPinRequest = null
+                                                        if (canUseAlbumBiometric) {
+                                                                showAlbumBiometricEnablePrompt =
+                                                                        true
+                                                        }
+                                                        Toast.makeText(
+                                                                        context,
+                                                                        "Album lock PIN enabled",
+                                                                        Toast.LENGTH_SHORT
+                                                                )
+                                                                .show()
+                                                }
+                                                AlbumPinMode.UNLOCK -> {
+                                                        val album = request.album
+                                                        if (pin == albumLockPin && album != null) {
+                                                                albumPinRequest = null
+                                                                unlockAlbumForOpen(album)
+                                                        } else {
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Incorrect PIN",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                        }
+                                                }
+                                                AlbumPinMode.CHANGE_VERIFY_CURRENT -> {
+                                                        if (pin == albumLockPin) {
+                                                                albumPinRequest =
+                                                                        AlbumPinRequest(
+                                                                                AlbumPinMode
+                                                                                        .CHANGE_SET_NEW
+                                                                        )
+                                                        } else {
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Incorrect PIN",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                        }
+                                                }
+                                                AlbumPinMode.CHANGE_SET_NEW -> {
+                                                        albumSecurityPrefs.edit()
+                                                                .putString(
+                                                                        ALBUM_LOCK_PIN_KEY,
+                                                                        pin
+                                                                )
+                                                                .apply()
+                                                        albumLocksRevision++
+                                                        selectedAlbumForActions = null
+                                                        albumPinRequest = null
+                                                        Toast.makeText(
+                                                                        context,
+                                                                        "Album PIN changed",
+                                                                        Toast.LENGTH_SHORT
+                                                                )
+                                                                .show()
+                                                }
+                                                AlbumPinMode.DISABLE_VERIFY -> {
+                                                        if (pin == albumLockPin) {
+                                                                albumSecurityPrefs.edit()
+                                                                        .remove(ALBUM_LOCK_PIN_KEY)
+                                                                        .remove(
+                                                                                ALBUM_LOCK_BIOMETRIC_KEY
+                                                                        )
+                                                                        .remove(
+                                                                                ALBUM_LOCKED_PATHS_KEY
+                                                                        )
+                                                                        .apply()
+                                                                unlockedAlbumPaths.clear()
+                                                                selectedAlbumForActions = null
+                                                                albumLocksRevision++
+                                                                albumPinRequest = null
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Album locks disabled",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                        } else {
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Incorrect PIN",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                        }
+                                                }
+                                                AlbumPinMode.REMOVE_LOCK_VERIFY -> {
+                                                        val album = request.album
+                                                        if (pin == albumLockPin && album != null) {
+                                                                setAlbumLocked(album, false)
+                                                                selectedAlbumForActions = null
+                                                                albumPinRequest = null
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Album lock removed",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                        } else {
+                                                                Toast.makeText(
+                                                                                context,
+                                                                                "Incorrect PIN",
+                                                                                Toast.LENGTH_SHORT
+                                                                        )
+                                                                        .show()
+                                                        }
+                                                }
+                                        }
+                                }
+                        )
+                }
+
+                if (showAlbumBiometricEnablePrompt) {
+                        AlertDialog(
+                                onDismissRequest = {
+                                        showAlbumBiometricEnablePrompt = false
+                                },
+                                title = { Text("Use Biometrics?") },
+                                text = {
+                                        Text(
+                                                "Enable biometric unlock for locked albums on this device?",
+                                                color = FluentTheme.colors.textColor
+                                        )
+                                },
+                                confirmButton = {
+                                        Button(
+                                                onClick = {
+                                                        albumSecurityPrefs.edit()
+                                                                .putBoolean(
+                                                                        ALBUM_LOCK_BIOMETRIC_KEY,
+                                                                        true
+                                                                )
+                                                                .apply()
+                                                        albumLocksRevision++
+                                                        showAlbumBiometricEnablePrompt = false
+                                                },
+                                                colors =
+                                                        ButtonDefaults.buttonColors(
+                                                                containerColor =
+                                                                        FluentTheme.colors.accent
+                                                        )
+                                        ) { Text("Enable", color = FluentTheme.colors.onAccent) }
+                                },
+                                dismissButton = {
+                                        TextButton(
+                                                onClick = {
+                                                        albumSecurityPrefs.edit()
+                                                                .putBoolean(
+                                                                        ALBUM_LOCK_BIOMETRIC_KEY,
+                                                                        false
+                                                                )
+                                                                .apply()
+                                                        albumLocksRevision++
+                                                        showAlbumBiometricEnablePrompt = false
+                                                }
+                                        ) {
+                                                Text("Not Now", color = FluentTheme.colors.textColor)
+                                        }
+                                },
+                                containerColor = FluentTheme.colors.pageBg
                         )
                 }
 
@@ -6005,7 +7180,11 @@ private fun ImageAlbumsGrid(
         albums: List<ImageAlbum>,
         gridState: LazyGridState,
         isLoading: Boolean,
+        selectedAlbum: ImageAlbum?,
+        lockedAlbumPaths: Set<String>,
+        pinnedAlbumPaths: Set<String>,
         onAlbumClick: (ImageAlbum) -> Unit,
+        onAlbumLongClick: (ImageAlbum) -> Unit,
         modifier: Modifier = Modifier
 ) {
         if (albums.isEmpty()) {
@@ -6042,78 +7221,166 @@ private fun ImageAlbumsGrid(
                         modifier = Modifier.fillMaxSize()
                 ) {
                         items(albums, key = { it.directory.absolutePath }) { album ->
+                                val isSelected =
+                                        selectedAlbum?.directory?.absolutePath ==
+                                                album.directory.absolutePath
+                                val isLocked = lockedAlbumPaths.contains(album.directory.absolutePath)
+                                val isPinned = pinnedAlbumPaths.contains(album.directory.absolutePath)
+                                val lockedTileColor =
+                                        if (FluentTheme.colors.isDark) Color(0xFF242424)
+                                        else FluentTheme.colors.panelBg
+                                val lockedIconColor =
+                                        if (FluentTheme.colors.isDark) Color(0xFF5E5E5E)
+                                        else FluentTheme.colors.textMuted.copy(alpha = 0.72f)
                                 Column(
                                         modifier =
                                                 Modifier.fillMaxWidth()
                                                         .combinedClickable(
-                                                                onClick = { onAlbumClick(album) }
+                                                                onClick = { onAlbumClick(album) },
+                                                                onLongClick = {
+                                                                        onAlbumLongClick(album)
+                                                                }
                                                         )
                                 ) {
-                                        Box(
-                                                modifier =
-                                                        Modifier.fillMaxWidth()
-                                                                .aspectRatio(1f)
-                                                                .clip(RoundedCornerShape(28.dp))
-                                                                .background(
-                                                                        FluentTheme.colors.surfaceBg
-                                                                )
-                                                                .border(
-                                                                        1.dp,
-                                                                        FluentTheme.colors
-                                                                                .panelBorder,
-                                                                        RoundedCornerShape(28.dp)
-                                                                )
-                                        ) {
-                                                SubcomposeAsyncImage(
-                                                        model =
-                                                                coil.request.ImageRequest
-                                                                        .Builder(LocalContext.current)
-                                                                        .data(album.coverFile)
-                                                                        .crossfade(false)
-                                                                        .build(),
-                                                        contentDescription = album.name,
-                                                        contentScale = ContentScale.Crop,
-                                                        modifier =
-                                                                Modifier.fillMaxSize()
-                                                                        .background(
-                                                                                FluentTheme.colors
-                                                                                        .surfaceBg
-                                                                        ),
-                                                        loading = {
-                                                                Box(
-                                                                        modifier =
-                                                                                Modifier.fillMaxSize()
-                                                                                        .background(
-                                                                                                shimmerBrush()
-                                                                                        )
-                                                                )
-                                                        },
-                                                        error = {
-                                                                Box(
-                                                                        modifier =
-                                                                                Modifier.fillMaxSize()
-                                                                                        .background(
-                                                                                                FluentTheme.colors
-                                                                                                        .panelBorder
-                                                                                        ),
-                                                                        contentAlignment =
-                                                                                Alignment.Center
-                                                                ) {
-                                                                        Icon(
-                                                                                Icons.Default
-                                                                                        .BrokenImage,
-                                                                                contentDescription =
-                                                                                        null,
-                                                                                tint =
-                                                                                        FluentTheme
-                                                                                                .colors
-                                                                                                .textMuted
-                                                                        )
-                                                                }
-                                                        },
-                                                        success = { SubcomposeAsyncImageContent() }
-                                                )
-                                        }
+                                         Box(
+                                                 modifier =
+                                                         Modifier.fillMaxWidth()
+                                                                 .aspectRatio(1f)
+                                                                 .clip(RoundedCornerShape(28.dp))
+                                                                  .background(
+                                                                          if (isLocked)
+                                                                                  lockedTileColor
+                                                                          else
+                                                                                  FluentTheme.colors
+                                                                                          .surfaceBg
+                                                                 )
+                                                                 .border(
+                                                                         if (isSelected) 3.dp else 1.dp,
+                                                                         if (isSelected)
+                                                                                 FluentTheme.colors.accent
+                                                                         else
+                                                                                 FluentTheme.colors
+                                                                                         .panelBorder,
+                                                                         RoundedCornerShape(28.dp)
+                                                                 )
+                                         ) {
+                                                 if (isLocked) {
+                                                         Box(
+                                                                 modifier = Modifier.fillMaxSize(),
+                                                                 contentAlignment = Alignment.Center
+                                                         ) {
+                                                                 Icon(
+                                                                          imageVector = Icons.Default.Lock,
+                                                                          contentDescription = null,
+                                                                          tint = lockedIconColor,
+                                                                          modifier = Modifier.size(70.dp)
+                                                                  )
+                                                         }
+                                                 } else {
+                                                         SubcomposeAsyncImage(
+                                                                 model =
+                                                                         coil.request.ImageRequest
+                                                                                 .Builder(
+                                                                                         LocalContext.current
+                                                                                 )
+                                                                                 .data(album.coverFile)
+                                                                                 .crossfade(false)
+                                                                                 .build(),
+                                                                 contentDescription = album.name,
+                                                                 contentScale = ContentScale.Crop,
+                                                                 modifier =
+                                                                         Modifier.fillMaxSize()
+                                                                                 .background(
+                                                                                         FluentTheme
+                                                                                                 .colors
+                                                                                                 .surfaceBg
+                                                                                 ),
+                                                                 loading = {
+                                                                         Box(
+                                                                                 modifier =
+                                                                                         Modifier.fillMaxSize()
+                                                                                                 .background(
+                                                                                                         shimmerBrush()
+                                                                                                 )
+                                                                         )
+                                                                 },
+                                                                 error = {
+                                                                         Box(
+                                                                                 modifier =
+                                                                                         Modifier.fillMaxSize()
+                                                                                                 .background(
+                                                                                                         FluentTheme
+                                                                                                                 .colors
+                                                                                                                 .panelBorder
+                                                                                                 ),
+                                                                                 contentAlignment =
+                                                                                         Alignment.Center
+                                                                         ) {
+                                                                                 Icon(
+                                                                                         Icons.Default
+                                                                                                 .BrokenImage,
+                                                                                         contentDescription =
+                                                                                                 null,
+                                                                                         tint =
+                                                                                                 FluentTheme
+                                                                                                         .colors
+                                                                                                         .textMuted
+                                                                                 )
+                                                                         }
+                                                                 },
+                                                                 success = { SubcomposeAsyncImageContent() }
+                                                         )
+                                                 }
+                                                 if (isSelected) {
+                                                         Box(
+                                                                 modifier =
+                                                                         Modifier.align(
+                                                                                         Alignment.TopEnd
+                                                                                 )
+                                                                                 .padding(10.dp)
+                                                                                 .size(28.dp)
+                                                                                 .clip(CircleShape)
+                                                                                 .background(
+                                                                                         FluentTheme
+                                                                                                 .colors
+                                                                                                 .accent
+                                                                                 ),
+                                                                 contentAlignment = Alignment.Center
+                                                         ) {
+                                                                 Icon(
+                                                                         Icons.Default.Check,
+                                                                         contentDescription = null,
+                                                                         tint = FluentTheme.colors.onAccent,
+                                                                         modifier = Modifier.size(18.dp)
+                                                                 )
+                                                         }
+                                                 }
+                                                 if (isPinned) {
+                                                         Box(
+                                                                 modifier =
+                                                                         Modifier.align(
+                                                                                         Alignment.TopStart
+                                                                                 )
+                                                                                 .padding(10.dp)
+                                                                                 .size(28.dp)
+                                                                                 .clip(CircleShape)
+                                                                                 .background(
+                                                                                         FluentTheme
+                                                                                                 .colors
+                                                                                                 .accent
+                                                                                                 .copy(alpha = 0.95f)
+                                                                                 ),
+                                                                 contentAlignment = Alignment.Center
+                                                         ) {
+                                                                 Icon(
+                                                                         Icons.Default.PushPin,
+                                                                         contentDescription = null,
+                                                                         tint = FluentTheme.colors.onAccent,
+                                                                         modifier = Modifier.size(16.dp)
+                                                                 )
+                                                         }
+                                                 }
+                                         }
                                         Spacer(modifier = Modifier.height(10.dp))
                                         Text(
                                                 text = album.name,
@@ -6136,6 +7403,270 @@ private fun ImageAlbumsGrid(
                 FastScrollbarGrid(
                         gridState = gridState,
                         modifier = Modifier.align(Alignment.CenterEnd)
+                )
+        }
+}
+
+@Composable
+private fun AlbumPinDialog(
+        title: String,
+        subtitle: String,
+        showBiometricButton: Boolean,
+        onBiometricClick: () -> Unit,
+        onDismiss: () -> Unit,
+        onPinEntered: (String) -> Unit
+) {
+        var pinBuffer by remember { mutableStateOf("") }
+        Dialog(onDismissRequest = onDismiss) {
+                Card(
+                        colors = CardDefaults.cardColors(containerColor = FluentTheme.colors.pageBg),
+                        modifier =
+                                Modifier.fillMaxWidth(0.95f)
+                                        .border(
+                                                1.dp,
+                                                FluentTheme.colors.panelBorder,
+                                                RoundedCornerShape(
+                                                        FluentTheme.dims.surfaceRadius
+                                                )
+                                        ),
+                        shape = RoundedCornerShape(FluentTheme.dims.surfaceRadius)
+                ) {
+                        Column(
+                                modifier = Modifier.fillMaxWidth().padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                                Text(
+                                        title,
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = FluentTheme.colors.textColor
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(subtitle, fontSize = 13.sp, color = FluentTheme.colors.textMuted)
+                                Spacer(modifier = Modifier.height(24.dp))
+                                Row(
+                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                        for (i in 0..3) {
+                                                val active = pinBuffer.length > i
+                                                Box(
+                                                        modifier =
+                                                                Modifier.size(16.dp)
+                                                                        .clip(CircleShape)
+                                                                        .border(
+                                                                                2.dp,
+                                                                                FluentTheme.colors
+                                                                                        .accent,
+                                                                                CircleShape
+                                                                        )
+                                                                        .background(
+                                                                                if (active)
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .accent
+                                                                                else Color.Transparent
+                                                                        )
+                                                )
+                                        }
+                                }
+                                Spacer(modifier = Modifier.height(32.dp))
+                                val rows =
+                                        listOf(
+                                                listOf("1", "2", "3"),
+                                                listOf("4", "5", "6"),
+                                                listOf("7", "8", "9"),
+                                                listOf("bio", "0", "del")
+                                        )
+                                Column(
+                                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                        rows.forEach { rowKeys ->
+                                                Row(
+                                                        horizontalArrangement =
+                                                                Arrangement.spacedBy(24.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                        rowKeys.forEach { key ->
+                                                                when (key) {
+                                                                        "bio" -> {
+                                                                                if (showBiometricButton) {
+                                                                                        PinKeyButton(
+                                                                                                onClick =
+                                                                                                        onBiometricClick
+                                                                                        ) {
+                                                                                                Icon(
+                                                                                                        Icons.Default
+                                                                                                                .Fingerprint,
+                                                                                                        contentDescription =
+                                                                                                                "Biometric unlock",
+                                                                                                        tint =
+                                                                                                                FluentTheme
+                                                                                                                        .colors
+                                                                                                                        .accent,
+                                                                                                        modifier =
+                                                                                                                Modifier.size(
+                                                                                                                        28.dp
+                                                                                                                )
+                                                                                                )
+                                                                                        }
+                                                                                } else {
+                                                                                        PinKeyButton(
+                                                                                                onClick =
+                                                                                                        onDismiss
+                                                                                        ) {
+                                                                                                Icon(
+                                                                                                        Icons.Default
+                                                                                                                .Close,
+                                                                                                        contentDescription =
+                                                                                                                "Cancel",
+                                                                                                        tint =
+                                                                                                                FluentTheme
+                                                                                                                        .colors
+                                                                                                                        .textColor,
+                                                                                                        modifier =
+                                                                                                                Modifier.size(
+                                                                                                                        22.dp
+                                                                                                                )
+                                                                                                )
+                                                                                        }
+                                                                                }
+                                                                        }
+                                                                        "del" -> {
+                                                                                PinKeyButton(
+                                                                                        onClick = {
+                                                                                                if (pinBuffer
+                                                                                                                .isNotEmpty()
+                                                                                                ) {
+                                                                                                        pinBuffer =
+                                                                                                                pinBuffer
+                                                                                                                        .dropLast(
+                                                                                                                                1
+                                                                                                                        )
+                                                                                                }
+                                                                                        }
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default
+                                                                                                        .Backspace,
+                                                                                                contentDescription =
+                                                                                                        "Delete",
+                                                                                                tint =
+                                                                                                        FluentTheme.colors
+                                                                                                                .textColor,
+                                                                                                modifier =
+                                                                                                        Modifier.size(
+                                                                                                                20.dp
+                                                                                                        )
+                                                                                        )
+                                                                                }
+                                                                        }
+                                                                        else -> {
+                                                                                PinKeyButton(
+                                                                                        onClick = {
+                                                                                                if (pinBuffer.length <
+                                                                                                                4
+                                                                                                ) {
+                                                                                                        val next =
+                                                                                                                pinBuffer +
+                                                                                                                        key
+                                                                                                        pinBuffer =
+                                                                                                                next
+                                                                                                        if (next.length ==
+                                                                                                                        4
+                                                                                                        ) {
+                                                                                                                onPinEntered(
+                                                                                                                        next
+                                                                                                                )
+                                                                                                                pinBuffer =
+                                                                                                                        ""
+                                                                                                        }
+                                                                                                }
+                                                                                        }
+                                                                                ) {
+                                                                                        Text(
+                                                                                                key,
+                                                                                                fontSize = 24.sp,
+                                                                                                fontWeight =
+                                                                                                        FontWeight.Normal,
+                                                                                                color =
+                                                                                                        FluentTheme.colors
+                                                                                                                .textColor
+                                                                                        )
+                                                                                }
+                                                                        }
+                                                                }
+                                                        }
+                                                }
+                                        }
+                                }
+                        }
+                }
+        }
+}
+
+@Composable
+private fun PinKeyButton(onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+        Box(
+                modifier =
+                        Modifier.size(64.dp)
+                                .clip(CircleShape)
+                                .background(FluentTheme.colors.surfaceBg)
+                                .border(1.dp, FluentTheme.colors.panelBorder, CircleShape)
+                                .clickable(onClick = onClick),
+                contentAlignment = Alignment.Center,
+                content = content
+        )
+}
+
+@Composable
+private fun LocalAlbumDetailsDialog(
+        album: ImageAlbum,
+        files: List<File>,
+        locked: Boolean,
+        onDismiss: () -> Unit
+) {
+        val totalBytes = remember(files) { files.sumOf { it.length() } }
+        AlertDialog(
+                onDismissRequest = onDismiss,
+                title = { Text("Album Details", color = FluentTheme.colors.textColor) },
+                text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                DetailRow("Name", album.name)
+                                DetailRow("Path", album.directory.absolutePath)
+                                DetailRow("Photos", files.size.toString())
+                                DetailRow("Size", formatSize(totalBytes))
+                                DetailRow("Locked", if (locked) "Yes" else "No")
+                                DetailRow(
+                                        "Modified",
+                                        SimpleDateFormat(
+                                                        "MMM dd, yyyy HH:mm",
+                                                        Locale.getDefault()
+                                                )
+                                                .format(Date(album.lastModified))
+                                )
+                        }
+                },
+                confirmButton = {
+                        TextButton(onClick = onDismiss) {
+                                Text("Close", color = FluentTheme.colors.accent)
+                        }
+                },
+                containerColor = FluentTheme.colors.pageBg
+        )
+}
+
+@Composable
+private fun DetailRow(label: String, value: String) {
+        Column {
+                Text(label, fontSize = 12.sp, color = FluentTheme.colors.textMuted)
+                Text(
+                        value,
+                        fontSize = 14.sp,
+                        color = FluentTheme.colors.textColor,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                 )
         }
 }
@@ -12394,6 +13925,97 @@ private fun sortImageAlbums(
                 }
         val sorted = albums.sortedWith(comparator)
         return if (ascending) sorted else sorted.reversed()
+}
+
+private const val ALBUM_LOCKED_PATHS_KEY = "album_locked_paths"
+private const val ALBUM_PINNED_PATHS_KEY = "album_pinned_paths"
+private const val ALBUM_LOCK_PIN_KEY = "album_lock_pin"
+private const val ALBUM_LOCK_BIOMETRIC_KEY = "album_lock_biometric"
+
+private fun loadLockedAlbumPaths(prefs: SharedPreferences): Set<String> {
+        val json = prefs.getString(ALBUM_LOCKED_PATHS_KEY, "[]") ?: "[]"
+        return try {
+                val array = JSONArray(json)
+                buildSet {
+                        for (i in 0 until array.length()) {
+                                add(array.getString(i))
+                        }
+                }
+        } catch (_: Exception) {
+                emptySet()
+        }
+}
+
+private fun saveLockedAlbumPaths(prefs: SharedPreferences, paths: Set<String>) {
+        val array = JSONArray()
+        paths.forEach { array.put(it) }
+        prefs.edit().putString(ALBUM_LOCKED_PATHS_KEY, array.toString()).apply()
+}
+
+private fun loadPinnedAlbumPaths(prefs: SharedPreferences): Set<String> {
+        val json = prefs.getString(ALBUM_PINNED_PATHS_KEY, "[]") ?: "[]"
+        return try {
+                val array = JSONArray(json)
+                buildSet {
+                        for (i in 0 until array.length()) {
+                                add(array.getString(i))
+                        }
+                }
+        } catch (_: Exception) {
+                emptySet()
+        }
+}
+
+private fun savePinnedAlbumPaths(prefs: SharedPreferences, paths: Set<String>) {
+        val array = JSONArray()
+        paths.forEach { array.put(it) }
+        prefs.edit().putString(ALBUM_PINNED_PATHS_KEY, array.toString()).apply()
+}
+
+private fun triggerAlbumBiometrics(
+        activity: FragmentActivity,
+        title: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+) {
+        val executor = ContextCompat.getMainExecutor(activity)
+        val biometricPrompt =
+                BiometricPrompt(
+                        activity,
+                        executor,
+                        object : BiometricPrompt.AuthenticationCallback() {
+                                override fun onAuthenticationSucceeded(
+                                        result: BiometricPrompt.AuthenticationResult
+                                ) {
+                                        super.onAuthenticationSucceeded(result)
+                                        onSuccess()
+                                }
+
+                                override fun onAuthenticationError(
+                                        errorCode: Int,
+                                        errString: CharSequence
+                                ) {
+                                        super.onAuthenticationError(errorCode, errString)
+                                        onError(errString.toString())
+                                }
+
+                                override fun onAuthenticationFailed() {
+                                        super.onAuthenticationFailed()
+                                        onError("Verification failed")
+                                }
+                        }
+                )
+        val promptInfo =
+                BiometricPrompt.PromptInfo.Builder()
+                        .setTitle(title)
+                        .setSubtitle("Authenticate to open this locked album")
+                        .setNegativeButtonText("Use PIN")
+                        .build()
+        try {
+                biometricPrompt.authenticate(promptInfo)
+        } catch (e: Exception) {
+                onError(e.localizedMessage ?: "Biometric error")
+        }
 }
 
 private fun getFileIcon(file: File): Pair<androidx.compose.ui.graphics.vector.ImageVector, Color> {
