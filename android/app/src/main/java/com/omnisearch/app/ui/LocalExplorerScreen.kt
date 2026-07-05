@@ -48,6 +48,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
@@ -73,6 +74,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -214,6 +216,46 @@ private fun Window.restoreAfterImmersiveMediaMode(snapshot: MediaWindowSnapshot)
 }
 
 @Composable
+private fun EdgeToEdgeReaderDialogWindow(activity: Activity?) {
+        val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+        DisposableEffect(activity, dialogWindow) {
+                dialogWindow?.apply {
+                        addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+                        addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
+                        clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS)
+                        clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
+                        statusBarColor = android.graphics.Color.TRANSPARENT
+                        navigationBarColor = android.graphics.Color.TRANSPARENT
+                        setBackgroundDrawable(
+                                android.graphics.drawable.ColorDrawable(
+                                        android.graphics.Color.TRANSPARENT
+                                )
+                        )
+                        attributes =
+                                attributes.apply {
+                                        width = WindowManager.LayoutParams.MATCH_PARENT
+                                        height = WindowManager.LayoutParams.MATCH_PARENT
+                                        gravity = Gravity.TOP or Gravity.START
+                                }
+                        setLayout(
+                                WindowManager.LayoutParams.MATCH_PARENT,
+                                WindowManager.LayoutParams.MATCH_PARENT
+                        )
+                        WindowCompat.setDecorFitsSystemWindows(this, false)
+                        WindowCompat.getInsetsController(this, decorView)
+                                .show(WindowInsetsCompat.Type.systemBars())
+                }
+                onDispose {}
+        }
+        SideEffect {
+                dialogWindow?.setLayout(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT
+                )
+        }
+}
+
+@Composable
 private fun ImmersiveMediaDialogWindow(activity: Activity?, keepScreenOn: Boolean = false) {
         val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
         DisposableEffect(activity, dialogWindow, keepScreenOn) {
@@ -335,6 +377,13 @@ private data class ImageAlbum(
         val lastModified: Long
 )
 
+private data class BatchFileProgress(
+        val title: String,
+        val completed: Int,
+        val total: Int,
+        val detail: String
+)
+
 private enum class AlbumPinMode {
         SET_NEW_FOR_LOCK,
         UNLOCK,
@@ -427,9 +476,12 @@ fun LocalExplorerScreen(
         var albumPinRequest by remember { mutableStateOf<AlbumPinRequest?>(null) }
         var showAlbumBiometricEnablePrompt by remember { mutableStateOf(false) }
         var albumLocksRevision by remember { mutableIntStateOf(0) }
+        var batchFileProgress by remember { mutableStateOf<BatchFileProgress?>(null) }
 
         // Previews/Players state
         var previewPdfFile by remember { mutableStateOf<File?>(null) }
+        var previewTextFile by remember { mutableStateOf<File?>(null) }
+        var createTextFileDirectory by remember { mutableStateOf<File?>(null) }
         var previewVideoFile by remember { mutableStateOf<File?>(null) }
         var previewImageFiles by remember { mutableStateOf<List<File>>(emptyList()) }
         var previewImageIndex by remember { mutableIntStateOf(0) }
@@ -730,6 +782,98 @@ fun LocalExplorerScreen(
                                 .apply()
                         loadFavorites()
                 } catch (_: Exception) {}
+        }
+
+        fun updateFavoritesBatch(files: List<File>, shouldFavorite: Boolean) {
+                val targets = files.filter { it.isFile }.distinctBy { it.absolutePath }
+                if (targets.isEmpty()) return
+                val hiddenAlbumPaths = lockedAlbumPaths
+                coroutineScope.launch {
+                        batchFileProgress =
+                                BatchFileProgress(
+                                        title =
+                                                if (shouldFavorite) "Favoriting items"
+                                                else "Removing favorites",
+                                        completed = 0,
+                                        total = targets.size,
+                                        detail = "Starting..."
+                                )
+                        val updatedFavorites =
+                                withContext(Dispatchers.IO) {
+                                        val prefs =
+                                                context.getSharedPreferences(
+                                                        "omnisearch_local_explorer",
+                                                        Context.MODE_PRIVATE
+                                                )
+                                        val favoritesJson =
+                                                prefs.getString("favorites_paths", "[]") ?: "[]"
+                                        val currentPaths = LinkedHashSet<String>()
+                                        try {
+                                                val arr = JSONArray(favoritesJson)
+                                                for (i in 0 until arr.length()) {
+                                                        currentPaths.add(arr.getString(i))
+                                                }
+                                        } catch (_: Exception) {}
+
+                                        targets.forEachIndexed { index, file ->
+                                                if (shouldFavorite) {
+                                                        currentPaths.add(file.absolutePath)
+                                                } else {
+                                                        currentPaths.remove(file.absolutePath)
+                                                }
+                                                val completed = index + 1
+                                                if (completed == targets.size ||
+                                                                completed % 25 == 0 ||
+                                                                completed == 1
+                                                ) {
+                                                        withContext(Dispatchers.Main) {
+                                                                batchFileProgress =
+                                                                        BatchFileProgress(
+                                                                                title =
+                                                                                        if (shouldFavorite)
+                                                                                                "Favoriting items"
+                                                                                        else
+                                                                                                "Removing favorites",
+                                                                                completed =
+                                                                                        completed,
+                                                                                total =
+                                                                                        targets.size,
+                                                                                detail =
+                                                                                        file.name
+                                                                        )
+                                                        }
+                                                }
+                                        }
+
+                                        prefs.edit()
+                                                .putString(
+                                                        "favorites_paths",
+                                                        JSONArray(currentPaths.toList()).toString()
+                                                )
+                                                .commit()
+
+                                        currentPaths.mapNotNull { path ->
+                                                val f = File(path)
+                                                if (f.exists() && !isInLockedAlbum(f, hiddenAlbumPaths)) f
+                                                else null
+                                        }
+                                }
+
+                        favoritesList = updatedFavorites
+                        batchFileProgress = null
+                        selectedFiles.clear()
+                        isMultiSelectMode = false
+                        selectedAlbumForActions = null
+                        Toast.makeText(
+                                        context,
+                                        if (shouldFavorite)
+                                                "Favorited ${targets.size} items"
+                                        else
+                                                "Removed ${targets.size} favorites",
+                                        Toast.LENGTH_SHORT
+                                )
+                                .show()
+                }
         }
 
         fun isFavorited(file: File): Boolean {
@@ -1074,24 +1218,64 @@ fun LocalExplorerScreen(
         }
 
         fun deleteFiles(files: List<File>) {
-                filesToDelete = files
+                filesToDelete = files.toList()
         }
 
         fun performDelete(files: List<File>) {
-                var count = 0
-                files.forEach { file ->
-                        if (LocalTrashManager.moveToTrash(context, file)) {
-                                count++
+                val targets = files.toList()
+                if (targets.isEmpty()) return
+                coroutineScope.launch {
+                        batchFileProgress =
+                                BatchFileProgress(
+                                        title = "Moving to Recycle Bin",
+                                        completed = 0,
+                                        total = targets.size,
+                                        detail = "Starting..."
+                                )
+                        val movedCount =
+                                withContext(Dispatchers.IO) {
+                                        var count = 0
+                                        targets.forEachIndexed { index, file ->
+                                                if (LocalTrashManager.moveToTrash(context, file)) {
+                                                        count++
+                                                }
+                                                val completed = index + 1
+                                                if (completed == targets.size ||
+                                                                completed % 10 == 0 ||
+                                                                completed == 1
+                                                ) {
+                                                        withContext(Dispatchers.Main) {
+                                                                batchFileProgress =
+                                                                        BatchFileProgress(
+                                                                                title =
+                                                                                        "Moving to Recycle Bin",
+                                                                                completed =
+                                                                                        completed,
+                                                                                total =
+                                                                                        targets.size,
+                                                                                detail =
+                                                                                        file.name
+                                                                        )
+                                                        }
+                                                }
+                                        }
+                                        count
+                                }
+                        batchFileProgress = null
+                        Toast.makeText(
+                                        context,
+                                        "Moved $movedCount items to Recycle Bin",
+                                        Toast.LENGTH_SHORT
+                                )
+                                .show()
+                        selectedFiles.clear()
+                        isMultiSelectMode = false
+                        selectedAlbumForActions = null
+                        refreshDirectory()
+                        loadRecentFiles()
+                        loadCategoryFiles()
+                        loadFavorites()
                         }
-                }
-                Toast.makeText(context, "Moved $count items to Recycle Bin", Toast.LENGTH_SHORT)
-                        .show()
-                selectedFiles.clear()
-                isMultiSelectMode = false
-                refreshDirectory()
-                loadRecentFiles()
-                loadCategoryFiles()
-                loadFavorites()
         }
 
         fun copyOrMoveFiles(files: List<File>, isMove: Boolean) {
@@ -1691,6 +1875,14 @@ fun LocalExplorerScreen(
                                                 }
                                         },
                                         onCreateFolder = { showCreateFolderDialog = true },
+                                        onCreateTextFile = {
+                                                createTextFileDirectory =
+                                                        Environment
+                                                                .getExternalStoragePublicDirectory(
+                                                                        Environment
+                                                                                .DIRECTORY_DOCUMENTS
+                                                                )
+                                        },
                                         onBackToPC = onBackToPC,
                                         onThemesClick = onThemesClick,
                                         isVideoCategory =
@@ -1712,6 +1904,9 @@ fun LocalExplorerScreen(
                                                 }
                                         },
                                         isImageCategory = isImagesCategory,
+                                        isDocumentsCategory =
+                                                currentView == ExplorerView.CATEGORY &&
+                                                        currentCategoryName == "Documents",
                                         useImageAlbums = useImageAlbums,
                                         onToggleImageAlbums = {
                                                 selectedImageAlbum = null
@@ -1790,6 +1985,10 @@ fun LocalExplorerScreen(
                                                                                 context = context,
                                                                                 onPdfPreview = {
                                                                                         previewPdfFile =
+                                                                                                it
+                                                                                },
+                                                                                onTextPreview = {
+                                                                                        previewTextFile =
                                                                                                 it
                                                                                 },
                                                                                 onVideoPlay = {
@@ -2101,6 +2300,10 @@ fun LocalExplorerScreen(
                                                                                                                         previewPdfFile =
                                                                                                                                 it
                                                                                                                 },
+                                                                                                                onTextPreview = {
+                                                                                                                        previewTextFile =
+                                                                                                                                it
+                                                                                                                },
                                                                                                                 onVideoPlay = {
                                                                                                                         previewVideoFile =
                                                                                                                                 it
@@ -2179,6 +2382,12 @@ fun LocalExplorerScreen(
                                                                                                 listOf(
                                                                                                         it
                                                                                                 )
+                                                                                        )
+                                                                                },
+                                                                                onOpenWith = {
+                                                                                        openFileWithExternalApp(
+                                                                                                context,
+                                                                                                it
                                                                                         )
                                                                                 },
                                                                                 onDetails = {
@@ -2373,6 +2582,10 @@ fun LocalExplorerScreen(
                                                                                                 previewPdfFile =
                                                                                                         it
                                                                                         },
+                                                                                        onTextPreview = {
+                                                                                                previewTextFile =
+                                                                                                        it
+                                                                                        },
                                                                                         onVideoPlay = {
                                                                                                 previewVideoFile =
                                                                                                         it
@@ -2420,6 +2633,12 @@ fun LocalExplorerScreen(
                                                                 onExtract = { extractZip(it) },
                                                                 onShare = {
                                                                         shareFiles(listOf(it))
+                                                                },
+                                                                onOpenWith = {
+                                                                        openFileWithExternalApp(
+                                                                                context,
+                                                                                it
+                                                                        )
                                                                 },
                                                                 onDetails = {
                                                                         showDetailsDialog = it
@@ -3351,6 +3570,10 @@ fun LocalExplorerScreen(
                                                                                                         previewPdfFile =
                                                                                                                 it
                                                                                                 },
+                                                                                                onTextPreview = {
+                                                                                                        previewTextFile =
+                                                                                                                it
+                                                                                                },
                                                                                                 onVideoPlay = {
                                                                                                         previewVideoFile =
                                                                                                                 it
@@ -3406,6 +3629,12 @@ fun LocalExplorerScreen(
                                                                         onShare = {
                                                                                 shareFiles(
                                                                                         listOf(it)
+                                                                                )
+                                                                        },
+                                                                        onOpenWith = {
+                                                                                openFileWithExternalApp(
+                                                                                        context,
+                                                                                        it
                                                                                 )
                                                                         },
                                                                         onDetails = {
@@ -3950,27 +4179,10 @@ fun LocalExplorerScreen(
                                                                                                         onClick = {
                                                                                                                 showAlbumMoreMenu =
                                                                                                                         false
-                                                                                                                filesInAlbum.forEach {
-                                                                                                                        file
-                                                                                                                        ->
-                                                                                                                        val fav =
-                                                                                                                                isFavorited(
-                                                                                                                                        file
-                                                                                                                                )
-                                                                                                                        if (anyNotFavorited &&
-                                                                                                                                        !fav
-                                                                                                                        ) {
-                                                                                                                                toggleFavorite(
-                                                                                                                                        file
-                                                                                                                                )
-                                                                                                                        } else if (!anyNotFavorited &&
-                                                                                                                                        fav
-                                                                                                                        ) {
-                                                                                                                                toggleFavorite(
-                                                                                                                                        file
-                                                                                                                                )
-                                                                                                                        }
-                                                                                                                }
+                                                                                                                updateFavoritesBatch(
+                                                                                                                        filesInAlbum,
+                                                                                                                        anyNotFavorited
+                                                                                                                )
                                                                                                                 clearAlbumSelection()
                                                                                                         },
                                                                                                         enabled = albumCanAccess
@@ -4492,34 +4704,11 @@ fun LocalExplorerScreen(
                                                                                                         onClick = {
                                                                                                                 showMoreMenu =
                                                                                                                         false
-                                                                                                                selectedFiles
-                                                                                                                        .toList()
-                                                                                                                        .forEach {
-                                                                                                                                file
-                                                                                                                                ->
-                                                                                                                                val isFav =
-                                                                                                                                        isFavorited(
-                                                                                                                                                file
-                                                                                                                                        )
-                                                                                                                                if (anyNotFavorited
-                                                                                                                                ) {
-                                                                                                                                        if (!isFav
-                                                                                                                                        )
-                                                                                                                                                toggleFavorite(
-                                                                                                                                                        file
-                                                                                                                                                )
-                                                                                                                                } else {
-                                                                                                                                        if (isFav
-                                                                                                                                        )
-                                                                                                                                                toggleFavorite(
-                                                                                                                                                        file
-                                                                                                                                                )
-                                                                                                                                }
-                                                                                                                        }
-                                                                                                                selectedFiles
-                                                                                                                        .clear()
-                                                                                                                isMultiSelectMode =
-                                                                                                                        false
+                                                                                                                updateFavoritesBatch(
+                                                                                                                        selectedFiles
+                                                                                                                                .toList(),
+                                                                                                                        anyNotFavorited
+                                                                                                                )
                                                                                                         }
                                                                                                 )
                                                                                                 DropdownMenuItem(
@@ -4941,6 +5130,10 @@ fun LocalExplorerScreen(
                         )
                 }
 
+                batchFileProgress?.let { progress ->
+                        BatchFileProgressDialog(progress = progress)
+                }
+
                 if (showCompressDialog != null) {
                         val files = showCompressDialog!!
                         val initialZipName =
@@ -5294,6 +5487,25 @@ fun LocalExplorerScreen(
                         )
                 }
 
+                if (previewTextFile != null || createTextFileDirectory != null) {
+                        LocalTextViewerDialog(
+                                file = previewTextFile,
+                                targetDirectory = createTextFileDirectory,
+                                startInCreateMode = createTextFileDirectory != null,
+                                onDismiss = {
+                                        previewTextFile = null
+                                        createTextFileDirectory = null
+                                },
+                                onFileSaved = {
+                                        createTextFileDirectory = null
+                                        refreshDirectory()
+                                        loadRecentFiles()
+                                        loadCategoryFiles()
+                                        loadFavorites()
+                                }
+                        )
+                }
+
                 if (previewVideoFile != null) {
                         LocalVideoPlayerDialog(
                                 file = previewVideoFile!!,
@@ -5374,6 +5586,7 @@ fun ExplorerHeader(
         sortAscending: Boolean,
         onToggleSortOrder: () -> Unit,
         onCreateFolder: () -> Unit,
+        onCreateTextFile: () -> Unit = {},
         onBackToPC: () -> Unit,
         onThemesClick: () -> Unit,
         isVideoCategory: Boolean = false,
@@ -5383,6 +5596,7 @@ fun ExplorerHeader(
         useFavoritesGrid: Boolean = false,
         onToggleFavoritesGrid: () -> Unit = {},
         isImageCategory: Boolean = false,
+        isDocumentsCategory: Boolean = false,
         useImageAlbums: Boolean = true,
         onToggleImageAlbums: () -> Unit = {},
         isConnectedToDesktop: Boolean = false,
@@ -5872,6 +6086,56 @@ fun ExplorerHeader(
                                                                 },
                                                                 onClick = {
                                                                         onToggleImageAlbums()
+                                                                        showMenu = false
+                                                                }
+                                                        )
+                                                        Divider(
+                                                                color =
+                                                                        FluentTheme.colors
+                                                                                .panelBorder
+                                                        )
+                                                }
+
+                                                if (isDocumentsCategory) {
+                                                        DropdownMenuItem(
+                                                                text = {
+                                                                        Row(
+                                                                                verticalAlignment =
+                                                                                        Alignment
+                                                                                                .CenterVertically
+                                                                        ) {
+                                                                                Icon(
+                                                                                        imageVector =
+                                                                                                Icons.Default
+                                                                                                        .NoteAdd,
+                                                                                        contentDescription =
+                                                                                                null,
+                                                                                        tint =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .accent,
+                                                                                        modifier =
+                                                                                                Modifier.size(
+                                                                                                        18.dp
+                                                                                                )
+                                                                                )
+                                                                                Spacer(
+                                                                                        modifier =
+                                                                                                Modifier.width(
+                                                                                                        8.dp
+                                                                                                )
+                                                                                )
+                                                                                Text(
+                                                                                        "Create TXT file",
+                                                                                        color =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .textColor
+                                                                                )
+                                                                        }
+                                                                },
+                                                                onClick = {
+                                                                        onCreateTextFile()
                                                                         showMenu = false
                                                                 }
                                                         )
@@ -7131,11 +7395,12 @@ fun HomeDashboard(
                                         onRename = null,
                                         onDelete = null,
                                         onCompress = null,
-                                        onExtract = null,
-                                        onShare = null,
-                                        onDetails = null,
-                                        onSendToDesktop = null
-                                )
+                                         onExtract = null,
+                                         onShare = null,
+                                         onOpenWith = null,
+                                         onDetails = null,
+                                         onSendToDesktop = null
+                                 )
                         }
                 }
         }
@@ -7671,6 +7936,48 @@ private fun DetailRow(label: String, value: String) {
         }
 }
 
+@Composable
+private fun BatchFileProgressDialog(progress: BatchFileProgress) {
+        val fraction =
+                if (progress.total <= 0) 0f
+                else progress.completed.toFloat() / progress.total.toFloat()
+        AlertDialog(
+                onDismissRequest = {},
+                title = {
+                        Text(
+                                progress.title,
+                                color = FluentTheme.colors.textColor,
+                                fontWeight = FontWeight.Bold
+                        )
+                },
+                text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                LinearProgressIndicator(
+                                        progress = fraction.coerceIn(0f, 1f),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = FluentTheme.colors.accent,
+                                        trackColor = FluentTheme.colors.panelBorder
+                                )
+                                Text(
+                                        "${progress.completed} / ${progress.total}",
+                                        color = FluentTheme.colors.textColor,
+                                        fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                        progress.detail,
+                                        color = FluentTheme.colors.textMuted,
+                                        fontSize = 12.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                )
+                        }
+                },
+                confirmButton = {},
+                containerColor = FluentTheme.colors.pageBg,
+                shape = RoundedCornerShape(16.dp)
+        )
+}
+
 // ---------------- DIRECTORY VIEWER ----------------
 @Composable
 fun DirectoryViewer(
@@ -7687,6 +7994,7 @@ fun DirectoryViewer(
         onCompress: (File) -> Unit,
         onExtract: (File) -> Unit,
         onShare: (File) -> Unit,
+        onOpenWith: (File) -> Unit,
         onDetails: (File) -> Unit,
         onSendToDesktop: (File) -> Unit = {},
         isConnectedToDesktop: Boolean = false,
@@ -7761,9 +8069,15 @@ fun DirectoryViewer(
                                                 onRename = { onRename(file) },
                                                 onDelete = { onDelete(file) },
                                                 onCompress = { onCompress(file) },
-                                                onExtract = { onExtract(file) },
-                                                onShare = { onShare(file) },
-                                                onDetails = { onDetails(file) },
+                                                 onExtract = { onExtract(file) },
+                                                 onShare = { onShare(file) },
+                                                 onOpenWith =
+                                                         if (file.isFile && file.extension.lowercase() in
+                                                                         listOf("pdf", "txt")
+                                                         ) {
+                                                                 { onOpenWith(file) }
+                                                         } else null,
+                                                 onDetails = { onDetails(file) },
                                                 onSendToDesktop =
                                                         if (file.isFile) {
                                                                 { onSendToDesktop(file) }
@@ -7794,9 +8108,15 @@ fun DirectoryViewer(
                                                 onRename = { onRename(file) },
                                                 onDelete = { onDelete(file) },
                                                 onCompress = { onCompress(file) },
-                                                onExtract = { onExtract(file) },
-                                                onShare = { onShare(file) },
-                                                onDetails = { onDetails(file) },
+                                                 onExtract = { onExtract(file) },
+                                                 onShare = { onShare(file) },
+                                                 onOpenWith =
+                                                         if (file.isFile && file.extension.lowercase() in
+                                                                         listOf("pdf", "txt")
+                                                         ) {
+                                                                 { onOpenWith(file) }
+                                                         } else null,
+                                                 onDetails = { onDetails(file) },
                                                 onSendToDesktop =
                                                         if (file.isFile) {
                                                                 { onSendToDesktop(file) }
@@ -7828,6 +8148,7 @@ fun LocalFileGridTile(
         onCompress: (() -> Unit)?,
         onExtract: (() -> Unit)?,
         onShare: (() -> Unit)?,
+        onOpenWith: (() -> Unit)?,
         onDetails: (() -> Unit)?,
         onSendToDesktop: (() -> Unit)? = null,
         isConnectedToDesktop: Boolean = false
@@ -8058,6 +8379,20 @@ fun LocalFileGridTile(
                                                 }
                                         )
                                 }
+                                onOpenWith?.let {
+                                        DropdownMenuItem(
+                                                text = {
+                                                        Text(
+                                                                "Open with...",
+                                                                color = FluentTheme.colors.textColor
+                                                        )
+                                                },
+                                                onClick = {
+                                                        it()
+                                                        showOptions = false
+                                                }
+                                        )
+                                }
                                 if (isConnectedToDesktop && onSendToDesktop != null) {
                                         DropdownMenuItem(
                                                 text = {
@@ -8156,6 +8491,7 @@ fun LocalFileRow(
         onCompress: (() -> Unit)?,
         onExtract: (() -> Unit)?,
         onShare: (() -> Unit)?,
+        onOpenWith: (() -> Unit)?,
         onDetails: (() -> Unit)?,
         onSendToDesktop: (() -> Unit)? = null,
         isConnectedToDesktop: Boolean = false
@@ -8462,24 +8798,41 @@ fun LocalFileRow(
                                                                 showOptions = false
                                                         }
                                                 )
-                                                DropdownMenuItem(
-                                                        text = {
-                                                                Text(
-                                                                        "Share",
+                                                 DropdownMenuItem(
+                                                         text = {
+                                                                 Text(
+                                                                         "Share",
                                                                         color =
                                                                                 FluentTheme.colors
                                                                                         .textColor
                                                                 )
                                                         },
-                                                        onClick = {
-                                                                onShare?.invoke()
-                                                                showOptions = false
-                                                        }
-                                                )
-                                                DropdownMenuItem(
-                                                        text = {
-                                                                Text(
-                                                                        "Compress (Zip)",
+                                                         onClick = {
+                                                                 onShare?.invoke()
+                                                                 showOptions = false
+                                                         }
+                                                 )
+                                                 onOpenWith?.let {
+                                                         DropdownMenuItem(
+                                                                 text = {
+                                                                         Text(
+                                                                                 "Open with...",
+                                                                                 color =
+                                                                                         FluentTheme
+                                                                                                 .colors
+                                                                                                 .textColor
+                                                                         )
+                                                                 },
+                                                                 onClick = {
+                                                                         it()
+                                                                         showOptions = false
+                                                                 }
+                                                         )
+                                                 }
+                                                 DropdownMenuItem(
+                                                         text = {
+                                                                 Text(
+                                                                         "Compress (Zip)",
                                                                         color =
                                                                                 FluentTheme.colors
                                                                                         .textColor
@@ -11250,6 +11603,8 @@ fun LocalFileDetailsDialog(file: File, onDismiss: () -> Unit) {
 // ---------------- LOCAL PDF VIEWER DIALOG ----------------
 @Composable
 fun LocalPdfViewerDialog(file: File, onDismiss: () -> Unit) {
+        val context = LocalContext.current
+        val activity = context as? Activity
         var pages by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
         var loading by remember { mutableStateOf(true) }
         var error by remember { mutableStateOf<String?>(null) }
@@ -11309,14 +11664,25 @@ fun LocalPdfViewerDialog(file: File, onDismiss: () -> Unit) {
                 }
         }
 
-        Dialog(onDismissRequest = onDismiss) {
+        Dialog(
+                onDismissRequest = onDismiss,
+                properties =
+                        DialogProperties(
+                                usePlatformDefaultWidth = false,
+                                decorFitsSystemWindows = false
+                        )
+        ) {
+                EdgeToEdgeReaderDialogWindow(activity)
                 Surface(
-                        modifier = Modifier.fillMaxSize().padding(vertical = 24.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        color = FluentTheme.colors.pageBg,
-                        border = BorderStroke(1.dp, FluentTheme.colors.panelBorder)
+                        modifier = Modifier.fillMaxSize(),
+                        shape = RoundedCornerShape(0.dp),
+                        color = FluentTheme.colors.pageBg
                 ) {
-                        Column(modifier = Modifier.fillMaxSize()) {
+                        Column(
+                                modifier =
+                                        Modifier.fillMaxSize()
+                                                .windowInsetsPadding(WindowInsets.safeDrawing)
+                        ) {
                                 // Header
                                 Row(
                                         modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -11483,6 +11849,412 @@ fun LocalPdfViewerDialog(file: File, onDismiss: () -> Unit) {
                                 }
                         }
                 }
+        }
+}
+
+// ---------------- LOCAL TEXT VIEWER DIALOG ----------------
+@Composable
+fun LocalTextViewerDialog(
+        file: File?,
+        targetDirectory: File? = null,
+        startInCreateMode: Boolean = false,
+        onDismiss: () -> Unit,
+        onFileSaved: (File) -> Unit = {}
+) {
+        val context = LocalContext.current
+        val activity = context as? Activity
+        val coroutineScope = rememberCoroutineScope()
+        var currentFile by remember(file) { mutableStateOf(file) }
+        var isCreatingNew by remember(file, startInCreateMode) {
+                mutableStateOf(startInCreateMode || file == null)
+        }
+        var draftText by remember(file) { mutableStateOf("") }
+        var showSaveNameDialog by remember { mutableStateOf(false) }
+        var saveName by remember { mutableStateOf("") }
+        var isSaving by remember { mutableStateOf(false) }
+        var textContent by remember(currentFile) { mutableStateOf<String?>(null) }
+        var error by remember(currentFile) { mutableStateOf<String?>(null) }
+
+        LaunchedEffect(currentFile, isCreatingNew) {
+                if (isCreatingNew) {
+                        textContent = ""
+                        error = null
+                        return@LaunchedEffect
+                }
+                val readableFile = currentFile
+                if (readableFile == null) {
+                        textContent = ""
+                        error = null
+                        return@LaunchedEffect
+                }
+                textContent = null
+                error = null
+                withContext(Dispatchers.IO) {
+                        try {
+                                val text =
+                                        readableFile.inputStream().bufferedReader(Charsets.UTF_8).use {
+                                                it.readText()
+                                        }
+                                withContext(Dispatchers.Main) { textContent = text }
+                        } catch (utfError: Exception) {
+                                try {
+                                        val text =
+                                                readableFile.inputStream()
+                                                        .bufferedReader(Charsets.ISO_8859_1)
+                                                        .use { it.readText() }
+                                        withContext(Dispatchers.Main) { textContent = text }
+                                } catch (fallbackError: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                                error =
+                                                        fallbackError.localizedMessage
+                                                                ?: "Failed to read text file"
+                                        }
+                                }
+                        }
+                }
+        }
+
+        Dialog(
+                onDismissRequest = onDismiss,
+                properties =
+                        DialogProperties(
+                                usePlatformDefaultWidth = false,
+                                decorFitsSystemWindows = false
+                        )
+        ) {
+                EdgeToEdgeReaderDialogWindow(activity)
+                Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        shape = RoundedCornerShape(0.dp),
+                        color = FluentTheme.colors.pageBg
+                ) {
+                        Column(
+                                modifier =
+                                        Modifier.fillMaxSize()
+                                                .windowInsetsPadding(WindowInsets.safeDrawing)
+                        ) {
+                                Row(
+                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                        Text(
+                                                text =
+                                                        if (isCreatingNew) "New text file"
+                                                        else currentFile?.name ?: "Text file",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 15.sp,
+                                                color = FluentTheme.colors.textColor,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                        )
+                                        if (!isCreatingNew) {
+                                                IconButton(
+                                                        onClick = {
+                                                                isCreatingNew = true
+                                                                draftText = ""
+                                                                error = null
+                                                        },
+                                                        enabled = !isSaving
+                                                ) {
+                                                        Icon(
+                                                                Icons.Default.Add,
+                                                                contentDescription =
+                                                                        "Create text file",
+                                                                tint = FluentTheme.colors.textColor
+                                                        )
+                                                }
+                                        }
+                                        if (isCreatingNew) {
+                                                IconButton(
+                                                        onClick = {
+                                                                saveName = ""
+                                                                showSaveNameDialog = true
+                                                        },
+                                                        enabled = draftText.isNotBlank() && !isSaving
+                                                ) {
+                                                        Icon(
+                                                                Icons.Default.Save,
+                                                                contentDescription =
+                                                                        "Save text file",
+                                                                tint =
+                                                                        if (draftText.isNotBlank() &&
+                                                                                        !isSaving
+                                                                        )
+                                                                                FluentTheme.colors
+                                                                                        .accent
+                                                                        else
+                                                                                FluentTheme.colors
+                                                                                        .textMuted
+                                                                                        .copy(
+                                                                                                alpha =
+                                                                                                        0.45f
+                                                                                        )
+                                                        )
+                                                }
+                                        }
+                                        IconButton(onClick = onDismiss) {
+                                                Icon(
+                                                        Icons.Default.Close,
+                                                        contentDescription = "Close",
+                                                        tint = FluentTheme.colors.textColor
+                                                )
+                                        }
+                                }
+
+                                Divider(color = FluentTheme.colors.panelBorder)
+
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                        when {
+                                                error != null -> {
+                                                        Text(
+                                                                text = "Error reading text: $error",
+                                                                color = FluentTheme.colors.dangerText,
+                                                                fontSize = 13.sp,
+                                                                modifier = Modifier.padding(16.dp)
+                                                        )
+                                                }
+                                                textContent == null -> {
+                                                        Column(
+                                                                modifier =
+                                                                        Modifier.align(
+                                                                                Alignment.Center
+                                                                        ),
+                                                                horizontalAlignment =
+                                                                        Alignment.CenterHorizontally
+                                                        ) {
+                                                                CircularProgressIndicator(
+                                                                        color =
+                                                                                FluentTheme.colors
+                                                                                        .accent
+                                                                )
+                                                                Spacer(
+                                                                        modifier =
+                                                                                Modifier.height(
+                                                                                        10.dp
+                                                                                )
+                                                                )
+                                                                Text(
+                                                                        "Opening text file...",
+                                                                        fontSize = 12.sp,
+                                                                        color =
+                                                                                FluentTheme.colors
+                                                                                        .textMuted
+                                                                )
+                                                        }
+                                                }
+                                                isCreatingNew -> {
+                                                        OutlinedTextField(
+                                                                value = draftText,
+                                                                onValueChange = { draftText = it },
+                                                                modifier =
+                                                                        Modifier.fillMaxSize()
+                                                                                .padding(16.dp),
+                                                                textStyle =
+                                                                        androidx.compose.ui.text
+                                                                                .TextStyle(
+                                                                                        color =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .textColor,
+                                                                                        fontSize =
+                                                                                                14.sp,
+                                                                                        lineHeight =
+                                                                                                20.sp,
+                                                                                        fontFamily =
+                                                                                                FontFamily
+                                                                                                        .Monospace
+                                                                                ),
+                                                                placeholder = {
+                                                                        Text(
+                                                                                "Start typing...",
+                                                                                color =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .textMuted
+                                                                        )
+                                                                },
+                                                                colors =
+                                                                        OutlinedTextFieldDefaults
+                                                                                .colors(
+                                                                                        focusedBorderColor =
+                                                                                                Color.Transparent,
+                                                                                        unfocusedBorderColor =
+                                                                                                Color.Transparent,
+                                                                                        focusedContainerColor =
+                                                                                                Color.Transparent,
+                                                                                        unfocusedContainerColor =
+                                                                                                Color.Transparent,
+                                                                                        cursorColor =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .accent,
+                                                                                        focusedTextColor =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .textColor,
+                                                                                        unfocusedTextColor =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .textColor
+                                                                                )
+                                                        )
+                                                }
+                                                else -> {
+                                                        val scrollState = rememberScrollState()
+                                                        SelectionContainer {
+                                                                Text(
+                                                                        text =
+                                                                                textContent
+                                                                                        ?: "",
+                                                                        color =
+                                                                                FluentTheme.colors
+                                                                                        .textColor,
+                                                                        fontSize = 14.sp,
+                                                                        lineHeight = 20.sp,
+                                                                        fontFamily =
+                                                                                FontFamily
+                                                                                        .Monospace,
+                                                                        modifier =
+                                                                                Modifier.fillMaxSize()
+                                                                                        .verticalScroll(
+                                                                                                scrollState
+                                                                                        )
+                                                                                        .padding(
+                                                                                                16.dp
+                                                                                        )
+                                                                )
+                                                        }
+                                                }
+                                        }
+                                }
+                        }
+                }
+        }
+
+        if (showSaveNameDialog) {
+                AlertDialog(
+                        onDismissRequest = {
+                                if (!isSaving) showSaveNameDialog = false
+                        },
+                        title = {
+                                Text(
+                                        "Save Text File",
+                                        color = FluentTheme.colors.textColor,
+                                        fontWeight = FontWeight.Bold
+                                )
+                        },
+                        text = {
+                                OutlinedTextField(
+                                        value = saveName,
+                                        onValueChange = { saveName = it },
+                                        label = { Text("File name") },
+                                        singleLine = true,
+                                        enabled = !isSaving,
+                                        colors =
+                                                OutlinedTextFieldDefaults.colors(
+                                                        focusedBorderColor =
+                                                                FluentTheme.colors.accent,
+                                                        focusedLabelColor =
+                                                                FluentTheme.colors.accent,
+                                                        cursorColor = FluentTheme.colors.accent
+                                                )
+                                )
+                        },
+                        confirmButton = {
+                                Button(
+                                        onClick = {
+                                                val cleanName = saveName.trim()
+                                                if (cleanName.isBlank()) return@Button
+                                                val finalName =
+                                                        if (cleanName.endsWith(
+                                                                        ".txt",
+                                                                        ignoreCase = true
+                                                                )
+                                                        )
+                                                                cleanName
+                                                        else "$cleanName.txt"
+                                                val parentDir =
+                                                        targetDirectory
+                                                                ?: currentFile?.parentFile
+                                                                ?: Environment
+                                                                        .getExternalStoragePublicDirectory(
+                                                                                Environment
+                                                                                        .DIRECTORY_DOCUMENTS
+                                                                        )
+                                                val target = File(parentDir, finalName)
+                                                if (target.exists()) {
+                                                        Toast.makeText(
+                                                                        context,
+                                                                        "A file with this name already exists",
+                                                                        Toast.LENGTH_SHORT
+                                                                )
+                                                                .show()
+                                                        return@Button
+                                                }
+                                                isSaving = true
+                                                coroutineScope.launch(Dispatchers.IO) {
+                                                        try {
+                                                                parentDir.mkdirs()
+                                                                target.writeText(
+                                                                        draftText,
+                                                                        Charsets.UTF_8
+                                                                )
+                                                                withContext(Dispatchers.Main) {
+                                                                        isSaving = false
+                                                                        showSaveNameDialog = false
+                                                                        currentFile = target
+                                                                        isCreatingNew = false
+                                                                        textContent = draftText
+                                                                        onFileSaved(target)
+                                                                        Toast.makeText(
+                                                                                        context,
+                                                                                        "Saved: ${target.name}",
+                                                                                        Toast.LENGTH_SHORT
+                                                                                )
+                                                                                .show()
+                                                                }
+                                                        } catch (e: Exception) {
+                                                                withContext(Dispatchers.Main) {
+                                                                        isSaving = false
+                                                                        Toast.makeText(
+                                                                                        context,
+                                                                                        "Save failed: ${e.localizedMessage}",
+                                                                                        Toast.LENGTH_LONG
+                                                                                )
+                                                                                .show()
+                                                                }
+                                                        }
+                                                }
+                                        },
+                                        enabled = saveName.isNotBlank() && !isSaving,
+                                        colors =
+                                                ButtonDefaults.buttonColors(
+                                                        containerColor = FluentTheme.colors.accent
+                                                )
+                                ) {
+                                        if (isSaving) {
+                                                CircularProgressIndicator(
+                                                        modifier = Modifier.size(16.dp),
+                                                        color = FluentTheme.colors.onAccent,
+                                                        strokeWidth = 2.dp
+                                                )
+                                        } else {
+                                                Text("Save", color = FluentTheme.colors.onAccent)
+                                        }
+                                }
+                        },
+                        dismissButton = {
+                                TextButton(
+                                        onClick = { showSaveNameDialog = false },
+                                        enabled = !isSaving
+                                ) {
+                                        Text("Cancel", color = FluentTheme.colors.textColor)
+                                }
+                        },
+                        containerColor = FluentTheme.colors.pageBg
+                )
         }
 }
 
@@ -14094,16 +14866,31 @@ private fun launchExternalViewer(context: Context, file: File, mimeType: String)
         }
 }
 
+private fun openFileWithExternalApp(context: Context, file: File) {
+        try {
+                launchExternalViewer(context, file, externalMimeTypeForFile(file))
+        } catch (e: Exception) {
+                Toast.makeText(
+                                context,
+                                "No app available to open this file: ${e.localizedMessage}",
+                                Toast.LENGTH_SHORT
+                        )
+                        .show()
+        }
+}
+
 private fun openLocalFile(
         file: File,
         context: Context,
         onPdfPreview: (File) -> Unit,
+        onTextPreview: (File) -> Unit,
         onVideoPlay: (File) -> Unit,
         onImagePreview: () -> Unit,
         onApkView: (File) -> Unit
 ) {
         when (file.extension.lowercase()) {
                 "pdf" -> onPdfPreview(file)
+                "txt" -> onTextPreview(file)
                 "mp4", "mkv", "webm", "avi", "3gp", "mov" -> onVideoPlay(file)
                 "png", "jpg", "jpeg", "webp", "gif", "bmp" -> onImagePreview()
                 "apk" -> onApkView(file)
