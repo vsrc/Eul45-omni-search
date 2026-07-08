@@ -10,9 +10,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.io.File
 
+enum class LocalMusicLoopMode {
+    OFF,
+    ONE,
+    QUEUE
+}
+
 object LocalMusicPlayerManager {
     private const val TAG = "MusicPlayer"
     private var mediaPlayer: MediaPlayer? = null
+    private var stateListener: (() -> Unit)? = null
     
     var currentPlayingFile by mutableStateOf<File?>(null)
         private set
@@ -20,8 +27,11 @@ object LocalMusicPlayerManager {
     var isPlaying by mutableStateOf(false)
         private set
 
-    var isLooping by mutableStateOf(false)
+    var loopMode by mutableStateOf(LocalMusicLoopMode.OFF)
         private set
+
+    val isLooping: Boolean
+        get() = loopMode != LocalMusicLoopMode.OFF
 
     var currentPlaybackPosition by mutableIntStateOf(0)
     
@@ -62,11 +72,25 @@ object LocalMusicPlayerManager {
                 setDataSource(file.absolutePath)
                 prepare()
                 setOnCompletionListener {
-                    if (isLooping) {
-                        seekTo(0)
-                        start()
-                    } else {
-                        next()
+                    when (loopMode) {
+                        LocalMusicLoopMode.ONE -> {
+                            seekTo(0)
+                            start()
+                            notifyStateChanged()
+                        }
+                        LocalMusicLoopMode.QUEUE -> {
+                            next()
+                        }
+                        LocalMusicLoopMode.OFF -> {
+                            if (currentIndex < playbackList.lastIndex) {
+                                next()
+                            } else {
+                                LocalMusicPlayerManager.isPlaying = false
+                                currentPlaybackPosition = duration
+                                handler.removeCallbacks(progressUpdater)
+                                notifyStateChanged()
+                            }
+                        }
                     }
                 }
                 start()
@@ -78,6 +102,7 @@ object LocalMusicPlayerManager {
             
             handler.removeCallbacks(progressUpdater)
             handler.post(progressUpdater)
+            notifyStateChanged()
         } catch (e: Exception) {
             Log.e(TAG, "Error playing audio file: ${file.absolutePath}", e)
         }
@@ -89,6 +114,7 @@ object LocalMusicPlayerManager {
                 player.pause()
                 isPlaying = false
                 handler.removeCallbacks(progressUpdater)
+                notifyStateChanged()
             }
         }
     }
@@ -99,6 +125,7 @@ object LocalMusicPlayerManager {
                 player.start()
                 isPlaying = true
                 handler.post(progressUpdater)
+                notifyStateChanged()
             }
         }
     }
@@ -114,6 +141,7 @@ object LocalMusicPlayerManager {
         currentPlaybackPosition = 0
         duration = 0
         handler.removeCallbacks(progressUpdater)
+        notifyStateChanged()
     }
 
     fun next() {
@@ -133,13 +161,30 @@ object LocalMusicPlayerManager {
 
     fun seekTo(positionMs: Int) {
         mediaPlayer?.let { player ->
-            player.seekTo(positionMs)
-            currentPlaybackPosition = positionMs
+            val safePosition = positionMs.coerceIn(0, duration.coerceAtLeast(0))
+            player.seekTo(safePosition)
+            currentPlaybackPosition = safePosition
+            notifyStateChanged()
         }
     }
 
     fun toggleLoop() {
-        isLooping = !isLooping
-        mediaPlayer?.isLooping = isLooping
+        loopMode =
+            when (loopMode) {
+                LocalMusicLoopMode.OFF -> LocalMusicLoopMode.ONE
+                LocalMusicLoopMode.ONE -> LocalMusicLoopMode.QUEUE
+                LocalMusicLoopMode.QUEUE -> LocalMusicLoopMode.OFF
+            }
+        mediaPlayer?.isLooping = false
+        notifyStateChanged()
+    }
+
+    fun setStateListener(listener: (() -> Unit)?) {
+        stateListener = listener
+        notifyStateChanged()
+    }
+
+    private fun notifyStateChanged() {
+        stateListener?.invoke()
     }
 }

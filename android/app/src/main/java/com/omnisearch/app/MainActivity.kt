@@ -30,10 +30,15 @@ import coil.decode.VideoFrameDecoder
 
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import com.omnisearch.app.ui.LocalMusicPlaybackService
 
 class MainActivity : FragmentActivity() {
+    private val openLocalMusicRequest = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        openLocalMusicRequest.value = shouldOpenLocalMusic(intent)
         
         // Initialize global Coil ImageLoader with VideoFrameDecoder for video thumbnail generation
         val imageLoader = ImageLoader.Builder(applicationContext)
@@ -70,7 +75,9 @@ class MainActivity : FragmentActivity() {
                 ) {
                     MainScreen(
                         syncViewModel = syncViewModel,
-                        securityViewModel = securityViewModel
+                        securityViewModel = securityViewModel,
+                        openLocalMusicRequest = openLocalMusicRequest.value,
+                        onOpenLocalMusicHandled = { openLocalMusicRequest.value = false }
                     )
                 }
             }
@@ -82,8 +89,15 @@ class MainActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (shouldOpenLocalMusic(intent)) {
+            openLocalMusicRequest.value = true
+        }
         handleShareIntent(intent)
     }
+
+    private fun shouldOpenLocalMusic(intent: Intent?): Boolean =
+        intent?.action == LocalMusicPlaybackService.ACTION_OPEN_LOCAL_MUSIC ||
+            intent?.getBooleanExtra(LocalMusicPlaybackService.EXTRA_OPEN_LOCAL_MUSIC, false) == true
 
     private fun handleShareIntent(intent: Intent?) {
         if (intent == null) return

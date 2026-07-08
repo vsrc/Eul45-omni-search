@@ -47,10 +47,13 @@ private fun formatTransferBytes(bytes: Long): String {
 @Composable
 fun MainScreen(
     syncViewModel: SyncViewModel,
-    securityViewModel: SecurityViewModel
+    securityViewModel: SecurityViewModel,
+    openLocalMusicRequest: Boolean = false,
+    onOpenLocalMusicHandled: () -> Unit = {}
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showLocalExplorer by rememberSaveable { mutableStateOf(false) }
+    var openMusicPlayerRequest by rememberSaveable { mutableIntStateOf(0) }
     val isLocked by securityViewModel.isLocked.collectAsState()
     val syncStatus by syncViewModel.status.collectAsState()
     val incomingTransfer by syncViewModel.incomingTransfer.collectAsState()
@@ -75,6 +78,16 @@ fun MainScreen(
     }
 
     var hasEnteredBackground by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(openLocalMusicRequest) {
+        if (openLocalMusicRequest) {
+            showThemesScreen = false
+            selectedTab = 0
+            showLocalExplorer = true
+            openMusicPlayerRequest++
+            onOpenLocalMusicHandled()
+        }
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -111,7 +124,8 @@ fun MainScreen(
             LocalExplorerScreen(
                 onBackToPC = { showLocalExplorer = false },
                 onThemesClick = { showThemesScreen = true },
-                syncViewModel = syncViewModel
+                syncViewModel = syncViewModel,
+                openMusicPlayerRequest = openMusicPlayerRequest
             )
         } else {
             Scaffold(

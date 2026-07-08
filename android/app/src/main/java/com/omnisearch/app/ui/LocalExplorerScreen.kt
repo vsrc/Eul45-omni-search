@@ -384,6 +384,9 @@ private data class BatchFileProgress(
         val detail: String
 )
 
+private val LOCAL_AUDIO_EXTENSIONS = setOf("mp3", "wav", "m4a", "flac", "ogg", "aac")
+private const val DIRECTORY_SEARCH_RESULT_LIMIT = 500
+
 private enum class AlbumPinMode {
         SET_NEW_FOR_LOCK,
         UNLOCK,
@@ -398,12 +401,50 @@ private data class AlbumPinRequest(
         val album: ImageAlbum? = null
 )
 
+private fun recursiveDirectorySearch(
+        root: File,
+        query: String,
+        showHiddenFiles: Boolean,
+        limit: Int = DIRECTORY_SEARCH_RESULT_LIMIT
+): List<File> {
+        val normalizedQuery = query.trim().lowercase()
+        if (normalizedQuery.isBlank() || !root.isDirectory) return emptyList()
+
+        val results = mutableListOf<File>()
+        val pending = ArrayDeque<File>()
+        pending.add(root)
+
+        while (pending.isNotEmpty() && results.size < limit) {
+                val directory = pending.removeFirst()
+                val children =
+                        try {
+                                directory.listFiles()
+                        } catch (_: Exception) {
+                                null
+                        } ?: continue
+
+                for (child in children) {
+                        if (!showHiddenFiles && child.name.startsWith(".")) continue
+                        if (child.name.lowercase().contains(normalizedQuery)) {
+                                results.add(child)
+                                if (results.size >= limit) break
+                        }
+                        if (child.isDirectory) {
+                                pending.add(child)
+                        }
+                }
+        }
+
+        return results
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LocalExplorerScreen(
         onBackToPC: () -> Unit,
         onThemesClick: () -> Unit,
         syncViewModel: SyncViewModel,
+        openMusicPlayerRequest: Int = 0,
         modifier: Modifier = Modifier
 ) {
         val context = LocalContext.current
@@ -487,6 +528,14 @@ fun LocalExplorerScreen(
         var previewImageIndex by remember { mutableIntStateOf(0) }
         var showMusicPlayerExpanded by remember { mutableStateOf(false) }
 
+        LaunchedEffect(openMusicPlayerRequest) {
+                if (openMusicPlayerRequest > 0 &&
+                                LocalMusicPlayerManager.currentPlayingFile != null
+                ) {
+                        showMusicPlayerExpanded = true
+                }
+        }
+
         // Dynamic file lists
         var directoryFiles by remember { mutableStateOf<List<File>>(emptyList()) }
         var recentFilesList by remember { mutableStateOf<List<File>>(emptyList()) }
@@ -495,6 +544,8 @@ fun LocalExplorerScreen(
                 mutableStateOf<List<LocalTrashManager.TrashItem>>(emptyList())
         }
         var categoryFilesList by remember { mutableStateOf<List<File>>(emptyList()) }
+        var directorySearchResults by remember { mutableStateOf<List<File>>(emptyList()) }
+        var isDirectorySearchLoading by remember { mutableStateOf(false) }
         var isLoading by remember { mutableStateOf(false) }
         val albumSecurityPrefs =
                 remember {
@@ -1113,6 +1164,31 @@ fun LocalExplorerScreen(
                                 }
                         }
                 }
+        }
+
+        LaunchedEffect(currentView, currentDirectory, searchQuery, showHiddenFiles, hasPermission) {
+                val query = searchQuery.trim()
+                if (!hasPermission ||
+                                currentView != ExplorerView.DIRECTORY ||
+                                query.isBlank()
+                ) {
+                        directorySearchResults = emptyList()
+                        isDirectorySearchLoading = false
+                        return@LaunchedEffect
+                }
+
+                isDirectorySearchLoading = true
+                delay(250)
+                val results =
+                        withContext(Dispatchers.IO) {
+                                recursiveDirectorySearch(
+                                        root = currentDirectory,
+                                        query = query,
+                                        showHiddenFiles = showHiddenFiles
+                                )
+                        }
+                directorySearchResults = results
+                isDirectorySearchLoading = false
         }
 
         LaunchedEffect(currentView, currentCategoryName, useImageAlbums) {
@@ -2041,14 +2117,39 @@ fun LocalExplorerScreen(
                                                         )
                                                 }
                                                 ExplorerView.DIRECTORY -> {
-                                                        val sorted =
+                                                        val localSorted =
                                                                 remember(
                                                                         directoryFiles,
+                                                                        showHiddenFiles,
+                                                                        sortType,
+                                                                        sortAscending
+                                                                ) {
+                                                                        sortFileList(
+                                                                                directoryFiles,
+                                                                                sortType,
+                                                                                sortAscending
+                                                                        )
+                                                                }
+                                                        val searchSorted =
+                                                                remember(
+                                                                        directorySearchResults,
                                                                         searchQuery,
                                                                         showHiddenFiles,
                                                                         sortType,
                                                                         sortAscending
-                                                                ) { sortFileList(directoryFiles) }
+                                                                ) {
+                                                                        sortFileList(
+                                                                                directorySearchResults,
+                                                                                sortType,
+                                                                                sortAscending
+                                                                        )
+                                                                }
+                                                        val isSearchingDirectory =
+                                                                searchQuery.trim().isNotEmpty()
+                                                        val sorted =
+                                                                if (isSearchingDirectory)
+                                                                        searchSorted
+                                                                else localSorted
                                                         Column(modifier = Modifier.fillMaxSize()) {
                                                                 PathBreadcrumbs(
                                                                         currentDirectory =
@@ -2214,8 +2315,31 @@ fun LocalExplorerScreen(
                                                                                         fontWeight =
                                                                                                 FontWeight
                                                                                                         .Medium
-                                                                                )
+                                                                                        )
                                                                         }
+                                                                }
+                                                                if (isSearchingDirectory) {
+                                                                        Text(
+                                                                                text =
+                                                                                        if (isDirectorySearchLoading)
+                                                                                                "Searching subfolders..."
+                                                                                        else
+                                                                                                "${sorted.size} matches in this folder tree",
+                                                                                color =
+                                                                                        FluentTheme
+                                                                                                .colors
+                                                                                                .textMuted,
+                                                                                fontSize = 12.sp,
+                                                                                modifier =
+                                                                                        Modifier
+                                                                                                .fillMaxWidth()
+                                                                                                .padding(
+                                                                                                        horizontal =
+                                                                                                                16.dp,
+                                                                                                        vertical =
+                                                                                                                4.dp
+                                                                                                )
+                                                                        )
                                                                 }
 
                                                                 Box(
@@ -2236,7 +2360,19 @@ fun LocalExplorerScreen(
                                                                                                         .clear()
                                                                                 },
                                                                                 isLoading =
-                                                                                        isLoading,
+                                                                                        if (isSearchingDirectory)
+                                                                                                isDirectorySearchLoading
+                                                                                        else
+                                                                                                isLoading,
+                                                                                emptyTitle =
+                                                                                        if (isSearchingDirectory)
+                                                                                                "No matching files found"
+                                                                                        else
+                                                                                                "This folder is empty",
+                                                                                searchRoot =
+                                                                                        if (isSearchingDirectory)
+                                                                                                currentDirectory
+                                                                                        else null,
                                                                                 onFileClick = { file
                                                                                         ->
                                                                                         if (isMultiSelectMode
@@ -2296,6 +2432,8 @@ fun LocalExplorerScreen(
                                                                                                                         file,
                                                                                                                 context =
                                                                                                                         context,
+                                                                                                                playbackQueue =
+                                                                                                                        sorted,
                                                                                                                 onPdfPreview = {
                                                                                                                         previewPdfFile =
                                                                                                                                 it
@@ -2578,6 +2716,8 @@ fun LocalExplorerScreen(
                                                                                         file = file,
                                                                                         context =
                                                                                                 context,
+                                                                                        playbackQueue =
+                                                                                                sorted,
                                                                                         onPdfPreview = {
                                                                                                 previewPdfFile =
                                                                                                         it
@@ -3566,6 +3706,8 @@ fun LocalExplorerScreen(
                                                                                                         file,
                                                                                                 context =
                                                                                                         context,
+                                                                                                playbackQueue =
+                                                                                                        sorted,
                                                                                                 onPdfPreview = {
                                                                                                         previewPdfFile =
                                                                                                                 it
@@ -4899,18 +5041,12 @@ fun LocalExplorerScreen(
                                                                 .padding(horizontal = 12.dp),
                                                 verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                                Icon(
-                                                        imageVector = Icons.Default.MusicNote,
-                                                        contentDescription = "Playing",
-                                                        tint = FluentTheme.colors.accent,
+                                                AudioArtworkOrIcon(
+                                                        file = playingSong,
                                                         modifier =
                                                                 Modifier.size(36.dp)
-                                                                        .clip(CircleShape)
-                                                                        .background(
-                                                                                FluentTheme.colors
-                                                                                        .surfaceBg
-                                                                        )
-                                                                        .padding(8.dp)
+                                                                        .clip(CircleShape),
+                                                        iconSize = 20.dp
                                                 )
                                                 Spacer(modifier = Modifier.width(12.dp))
                                                 Column(modifier = Modifier.weight(1f)) {
@@ -7937,6 +8073,42 @@ private fun DetailRow(label: String, value: String) {
 }
 
 @Composable
+private fun AudioArtworkOrIcon(
+        file: File,
+        modifier: Modifier,
+        iconSize: androidx.compose.ui.unit.Dp,
+        iconTint: Color = FluentTheme.colors.accent,
+        contentScale: ContentScale = ContentScale.Crop
+) {
+        var artwork by remember(file) { mutableStateOf<Bitmap?>(null) }
+        LaunchedEffect(file) {
+                artwork = withContext(Dispatchers.IO) { LocalAudioArtworkCache.get(file) }
+        }
+        Box(
+                modifier = modifier.background(FluentTheme.colors.surfaceBg),
+                contentAlignment = Alignment.Center
+        ) {
+                val art = artwork
+                if (art != null) {
+                        Image(
+                                bitmap = art.asImageBitmap(),
+                                contentDescription = file.name,
+                                contentScale = contentScale,
+                                modifier = Modifier.fillMaxSize()
+                        )
+                } else {
+                        Icon(
+                                imageVector = Icons.Default.MusicNote,
+                                contentDescription = null,
+                                tint = iconTint,
+                                modifier = Modifier.size(iconSize)
+                        )
+                }
+        }
+
+}
+
+@Composable
 private fun BatchFileProgressDialog(progress: BatchFileProgress) {
         val fraction =
                 if (progress.total <= 0) 0f
@@ -7999,7 +8171,9 @@ fun DirectoryViewer(
         onSendToDesktop: (File) -> Unit = {},
         isConnectedToDesktop: Boolean = false,
         useGrid: Boolean = false,
-        isLoading: Boolean = false
+        isLoading: Boolean = false,
+        emptyTitle: String = "This folder is empty",
+        searchRoot: File? = null
 ) {
         if (files.isEmpty()) {
                 if (isLoading) {
@@ -8018,7 +8192,7 @@ fun DirectoryViewer(
                                         )
                                         Spacer(modifier = Modifier.height(12.dp))
                                         Text(
-                                                "This folder is empty",
+                                                emptyTitle,
                                                 color = FluentTheme.colors.textColor,
                                                 fontWeight = FontWeight.SemiBold
                                         )
@@ -8082,7 +8256,8 @@ fun DirectoryViewer(
                                                         if (file.isFile) {
                                                                 { onSendToDesktop(file) }
                                                         } else null,
-                                                isConnectedToDesktop = isConnectedToDesktop
+                                                isConnectedToDesktop = isConnectedToDesktop,
+                                                searchRoot = searchRoot
                                         )
                                 }
                         }
@@ -8151,15 +8326,29 @@ fun LocalFileGridTile(
         onOpenWith: (() -> Unit)?,
         onDetails: (() -> Unit)?,
         onSendToDesktop: (() -> Unit)? = null,
-        isConnectedToDesktop: Boolean = false
+        isConnectedToDesktop: Boolean = false,
+        searchRoot: File? = null
 ) {
         val iconInfo = remember(file) { getFileIcon(file) }
+        val relativeFolder =
+                remember(file, searchRoot) {
+                        val rootPath = searchRoot?.absoluteFile?.absolutePath ?: return@remember null
+                        val parentPath = file.parentFile?.absoluteFile?.absolutePath ?: return@remember null
+                        if (parentPath == rootPath) {
+                                null
+                        } else if (parentPath.startsWith(rootPath + File.separator)) {
+                                parentPath.removePrefix(rootPath + File.separator)
+                        } else {
+                                parentPath
+                        }
+                }
         val isImage =
                 file.extension.lowercase() in listOf("jpg", "jpeg", "png", "webp", "gif") &&
                         !file.isDirectory
         val isVideo =
                 file.extension.lowercase() in listOf("mp4", "mkv", "avi", "mov", "webm", "3gp") &&
                         !file.isDirectory
+        val isAudio = file.extension.lowercase() in LOCAL_AUDIO_EXTENSIONS && !file.isDirectory
         var showOptions by remember { mutableStateOf(false) }
 
         Column(
@@ -8286,6 +8475,14 @@ fun LocalFileGridTile(
                                                         modifier = Modifier.size(20.dp)
                                                 )
                                         }
+                                }
+                                isAudio -> {
+                                        AudioArtworkOrIcon(
+                                                file = file,
+                                                modifier = Modifier.fillMaxSize(),
+                                                iconSize = 34.dp,
+                                                iconTint = iconInfo.second
+                                        )
                                 }
                                 else -> {
                                         Icon(
@@ -8494,7 +8691,8 @@ fun LocalFileRow(
         onOpenWith: (() -> Unit)?,
         onDetails: (() -> Unit)?,
         onSendToDesktop: (() -> Unit)? = null,
-        isConnectedToDesktop: Boolean = false
+        isConnectedToDesktop: Boolean = false,
+        searchRoot: File? = null
 ) {
         val formattedDate =
                 remember(file.lastModified()) {
@@ -8513,6 +8711,21 @@ fun LocalFileRow(
                 }
 
         val iconInfo = remember(file) { getFileIcon(file) }
+        val relativeFolder =
+                remember(file, searchRoot) {
+                        val rootPath =
+                                searchRoot?.absoluteFile?.absolutePath ?: return@remember null
+                        val parentPath =
+                                file.parentFile?.absoluteFile?.absolutePath
+                                        ?: return@remember null
+                        if (parentPath == rootPath) {
+                                null
+                        } else if (parentPath.startsWith(rootPath + File.separator)) {
+                                parentPath.removePrefix(rootPath + File.separator)
+                        } else {
+                                parentPath
+                        }
+                }
 
         Column(modifier = Modifier.fillMaxWidth()) {
                 Row(
@@ -8551,7 +8764,8 @@ fun LocalFileRow(
                         val isVid =
                                 file.extension.lowercase() in
                                         listOf("mp4", "mkv", "avi", "mov", "webm", "3gp")
-                        if ((isImg || isVid) && !file.isDirectory) {
+                        val isAud = file.extension.lowercase() in LOCAL_AUDIO_EXTENSIONS
+                        if ((isImg || isVid || isAud) && !file.isDirectory) {
                                 if (isVid) {
                                         // Load video thumbnail asynchronously with caching and
                                         // serialized concurrency
@@ -8643,7 +8857,7 @@ fun LocalFileRow(
                                                         }
                                                 }
                                         }
-                                } else {
+                                } else if (isImg) {
                                         AsyncImage(
                                                 model = file,
                                                 contentDescription = null,
@@ -8655,6 +8869,15 @@ fun LocalFileRow(
                                                                         FluentTheme.colors
                                                                                 .panelBorder
                                                                 )
+                                        )
+                                } else {
+                                        AudioArtworkOrIcon(
+                                                file = file,
+                                                modifier =
+                                                        Modifier.size(44.dp)
+                                                                .clip(RoundedCornerShape(8.dp)),
+                                                iconSize = 24.dp,
+                                                iconTint = iconInfo.second
                                         )
                                 }
                         } else {
@@ -8705,6 +8928,16 @@ fun LocalFileRow(
                                                         else formatSize(file.length()),
                                                 fontSize = 12.sp,
                                                 color = FluentTheme.colors.textMuted
+                                        )
+                                }
+                                if (!relativeFolder.isNullOrBlank()) {
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        Text(
+                                                text = relativeFolder,
+                                                fontSize = 11.sp,
+                                                color = FluentTheme.colors.textMuted,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                         )
                                 }
                         }
@@ -12298,11 +12531,12 @@ fun LocalMusicPlayerDialog(file: File, onDismiss: () -> Unit) {
 
                                 Spacer(modifier = Modifier.height(20.dp))
 
-                                // Beautiful Glowing Vinyl Disc animation
-                                Box(
+                                AudioArtworkOrIcon(
+                                        file = file,
                                         modifier =
-                                                Modifier.size(150.dp)
-                                                        .clip(CircleShape)
+                                                Modifier.fillMaxWidth(0.72f)
+                                                        .aspectRatio(1.28f)
+                                                        .clip(RoundedCornerShape(18.dp))
                                                         .background(
                                                                 Brush.linearGradient(
                                                                         colors =
@@ -12316,15 +12550,10 @@ fun LocalMusicPlayerDialog(file: File, onDismiss: () -> Unit) {
                                                                                 )
                                                                 )
                                                         ),
-                                        contentAlignment = Alignment.Center
-                                ) {
-                                        Icon(
-                                                imageVector = Icons.Default.MusicNote,
-                                                contentDescription = null,
-                                                tint = Color.White,
-                                                modifier = Modifier.size(64.dp)
-                                        )
-                                }
+                                        iconSize = 64.dp,
+                                        iconTint = Color.White,
+                                        contentScale = ContentScale.Fit
+                                )
 
                                 Spacer(modifier = Modifier.height(20.dp))
 
@@ -12343,14 +12572,24 @@ fun LocalMusicPlayerDialog(file: File, onDismiss: () -> Unit) {
 
                                 // Seek slider
                                 var sliderValue by
-                                        remember(position) { mutableStateOf(position.toFloat()) }
+                                        remember { mutableFloatStateOf(position.toFloat()) }
+                                var isSeeking by remember { mutableStateOf(false) }
+                                LaunchedEffect(position, isSeeking) {
+                                        if (!isSeeking) sliderValue = position.toFloat()
+                                }
+                                val sliderMax = duration.toFloat().coerceAtLeast(1f)
                                 Slider(
-                                        value = sliderValue,
-                                        onValueChange = { sliderValue = it },
+                                        value = sliderValue.coerceIn(0f, sliderMax),
+                                        onValueChange = {
+                                                isSeeking = true
+                                                sliderValue = it
+                                                LocalMusicPlayerManager.seekTo(it.toInt())
+                                        },
                                         onValueChangeFinished = {
                                                 LocalMusicPlayerManager.seekTo(sliderValue.toInt())
+                                                isSeeking = false
                                         },
-                                        valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
+                                        valueRange = 0f..sliderMax,
                                         colors =
                                                 SliderDefaults.colors(
                                                         activeTrackColor =
@@ -12385,20 +12624,34 @@ fun LocalMusicPlayerDialog(file: File, onDismiss: () -> Unit) {
                                         horizontalArrangement = Arrangement.Center,
                                         verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                        // Loop toggle
+                                        // Loop mode toggle: off -> one -> queue
                                         IconButton(
                                                 onClick = { LocalMusicPlayerManager.toggleLoop() },
                                                 modifier = Modifier.size(40.dp)
                                         ) {
                                                 Icon(
-                                                        Icons.Default.Repeat,
-                                                        contentDescription = "Loop",
+                                                        if (LocalMusicPlayerManager.loopMode ==
+                                                                        LocalMusicLoopMode.ONE
+                                                        )
+                                                                Icons.Default.RepeatOne
+                                                        else Icons.Default.Repeat,
+                                                        contentDescription =
+                                                                when (LocalMusicPlayerManager.loopMode) {
+                                                                        LocalMusicLoopMode.OFF ->
+                                                                                "Loop off"
+                                                                        LocalMusicLoopMode.ONE ->
+                                                                                "Loop song"
+                                                                        LocalMusicLoopMode.QUEUE ->
+                                                                                "Loop folder"
+                                                                },
                                                         tint =
-                                                                if (LocalMusicPlayerManager
-                                                                                .isLooping
-                                                                )
+                                                                if (LocalMusicPlayerManager.loopMode !=
+                                                                                LocalMusicLoopMode.OFF
+                                                                ) {
                                                                         FluentTheme.colors.accent
-                                                                else FluentTheme.colors.textMuted,
+                                                                } else {
+                                                                        FluentTheme.colors.textMuted
+                                                                },
                                                         modifier = Modifier.size(22.dp)
                                                 )
                                         }
@@ -14882,6 +15135,7 @@ private fun openFileWithExternalApp(context: Context, file: File) {
 private fun openLocalFile(
         file: File,
         context: Context,
+        playbackQueue: List<File>? = null,
         onPdfPreview: (File) -> Unit,
         onTextPreview: (File) -> Unit,
         onVideoPlay: (File) -> Unit,
@@ -14895,25 +15149,27 @@ private fun openLocalFile(
                 "png", "jpg", "jpeg", "webp", "gif", "bmp" -> onImagePreview()
                 "apk" -> onApkView(file)
                 "mp3", "wav", "m4a", "flac", "ogg", "aac" -> {
-                        // Find all music files in parent folder to create a queue
                         val musicFiles =
-                                file.parentFile
-                                        ?.listFiles()
+                                playbackQueue
                                         ?.filter {
                                                 it.isFile &&
                                                         it.extension.lowercase() in
-                                                                listOf(
-                                                                        "mp3",
-                                                                        "wav",
-                                                                        "m4a",
-                                                                        "flac",
-                                                                        "ogg",
-                                                                        "aac"
-                                                                )
+                                                                LOCAL_AUDIO_EXTENSIONS
                                         }
-                                        ?.toList()
-                                        ?: emptyList()
+                                        ?.distinctBy { it.absolutePath }
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?: file.parentFile
+                                                ?.listFiles()
+                                                ?.filter {
+                                                        it.isFile &&
+                                                                it.extension.lowercase() in
+                                                                        LOCAL_AUDIO_EXTENSIONS
+                                                }
+                                                ?.sortedBy { it.name.lowercase() }
+                                                ?.toList()
+                                        ?: listOf(file)
                         LocalMusicPlayerManager.play(file, musicFiles)
+                        LocalMusicPlaybackService.start(context)
                 }
                 else -> {
                         try {
