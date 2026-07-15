@@ -32,6 +32,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -44,6 +47,7 @@ import com.omnisearch.app.data.SearchResult
 import com.omnisearch.app.data.PinnedFileEntity
 import com.omnisearch.app.ui.theme.FluentTheme
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.text.selection.SelectionContainer
 import android.widget.VideoView
@@ -55,6 +59,8 @@ import java.io.File
 fun SearchScreen(
     syncViewModel: SyncViewModel,
     onOpenExplorer: () -> Unit,
+    triggerAutoFocus: Boolean = false,
+    onTriggerAutoFocusHandled: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -85,6 +91,19 @@ fun SearchScreen(
     var previewFile by remember { mutableStateOf<SearchResult?>(null) }
     
     var showDuplicatesDialog by remember { mutableStateOf(false) }
+    var showWidgetsScreen by remember { mutableStateOf(false) }
+
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(triggerAutoFocus) {
+        if (triggerAutoFocus) {
+            delay(300)
+            focusRequester.requestFocus()
+            keyboardController?.show()
+            onTriggerAutoFocusHandled()
+        }
+    }
 
     val extensionFilters = listOf(
         Pair("all", "All Files"),
@@ -95,6 +114,11 @@ fun SearchScreen(
         Pair("rs,py,java,js,ts,kt,cpp,h", "Code"),
         Pair("zip,rar,7z,tar,gz", "Archives")
     )
+
+    if (showWidgetsScreen) {
+        com.omnisearch.app.ui.WidgetsScreen(onBack = { showWidgetsScreen = false })
+        return
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -234,6 +258,52 @@ fun SearchScreen(
                 }
             }
 
+            val sharedPrefs = context.getSharedPreferences("OmniSearchPrefs", Context.MODE_PRIVATE)
+            var showBanner by remember { mutableStateOf(sharedPrefs.getBoolean("show_widgets_banner", true)) }
+
+            if (showBanner) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = FluentTheme.dims.paddingLarge, vertical = 4.dp)
+                        .clickable { 
+                            sharedPrefs.edit().putBoolean("show_widgets_banner", false).apply()
+                            showBanner = false
+                            showWidgetsScreen = true 
+                        },
+                    colors = CardDefaults.cardColors(containerColor = FluentTheme.colors.surfaceBg),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, FluentTheme.colors.panelBorder)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            painter = androidx.compose.ui.res.painterResource(id = com.omnisearch.app.R.drawable.ic_widget_qr),
+                            contentDescription = "Widgets",
+                            tint = FluentTheme.colors.accent,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Text(
+                            text = "Add widgets to your home screen",
+                            color = FluentTheme.colors.textColor,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            imageVector = Icons.Outlined.ChevronRight,
+                            contentDescription = null,
+                            tint = FluentTheme.colors.textMuted
+                        )
+                    }
+                }
+            }
+
             // Connection notification banner
             AnimatedVisibility(visible = error.isNotEmpty() || actionMessage.isNotEmpty()) {
                 val isErr = error.isNotEmpty()
@@ -348,7 +418,7 @@ fun SearchScreen(
                                 )
                             },
                             placeholder = "Search files instantly...",
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f).focusRequester(focusRequester)
                         )
                         if (searchQuery.isNotEmpty()) {
                             Icon(
@@ -801,6 +871,25 @@ fun SearchScreen(
                             Divider(color = FluentTheme.colors.panelBorder)
                         }
 
+                        // Download to Phone
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    syncViewModel.triggerRemoteTransfer(file.path)
+                                    showActionSheet = false
+                                    Toast.makeText(context, "Download transfer started...", Toast.LENGTH_SHORT).show()
+                                }
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, tint = FluentTheme.colors.textColor)
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("Download to Phone", color = FluentTheme.colors.textColor)
+                        }
+
+                        Divider(color = FluentTheme.colors.panelBorder)
+
                         // Delete from Computer
                         Row(
                             modifier = Modifier
@@ -973,28 +1062,34 @@ fun SearchScreen(
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         // Download/Save button
-                        if (fileContent != null) {
-                            IconButton(
-                                onClick = {
+                        IconButton(
+                            onClick = {
+                                if (fileContent != null) {
                                     syncViewModel.saveFileToDisk(
                                         context = context,
                                         fileName = file.name,
                                         contentType = fileContent!!.contentType,
                                         base64Data = fileContent!!.data
                                     )
-                                },
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(FluentTheme.colors.accent)
-                                    .size(36.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Download,
-                                    contentDescription = "Save file",
-                                    tint = FluentTheme.colors.onAccent,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
+                                } else {
+                                    syncViewModel.triggerRemoteTransfer(file.path)
+                                    showFilePreview = false
+                                    previewFile = null
+                                    syncViewModel.clearFileContent()
+                                    Toast.makeText(context, "Download transfer started...", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(FluentTheme.colors.accent)
+                                .size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Download,
+                                contentDescription = "Save file",
+                                tint = FluentTheme.colors.onAccent,
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
 
                         IconButton(

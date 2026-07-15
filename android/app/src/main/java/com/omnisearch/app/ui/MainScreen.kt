@@ -11,6 +11,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
@@ -49,17 +54,35 @@ fun MainScreen(
     syncViewModel: SyncViewModel,
     securityViewModel: SecurityViewModel,
     openLocalMusicRequest: Boolean = false,
-    onOpenLocalMusicHandled: () -> Unit = {}
+    autoPlayFilePath: String? = null,
+    onOpenLocalMusicHandled: () -> Unit = {},
+    openScannerRequest: Boolean = false,
+    onOpenScannerHandled: () -> Unit = {},
+    openLocalExplorerRequest: Boolean = false,
+    initialExplorerCategory: String? = null,
+    onOpenLocalExplorerHandled: () -> Unit = {},
+    onInitialCategoryHandled: () -> Unit = {},
+    openOmniSearchRequest: Boolean = false,
+    onOpenOmniSearchHandled: () -> Unit = {},
+    openLocalSearchRequest: Boolean = false,
+    onOpenLocalSearchHandled: () -> Unit = {}
 ) {
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var showLocalExplorer by rememberSaveable { mutableStateOf(false) }
-    var openMusicPlayerRequest by rememberSaveable { mutableIntStateOf(0) }
+    var selectedTab by rememberSaveable { mutableIntStateOf(if (openScannerRequest) 2 else 0) }
+    var showLocalExplorer by rememberSaveable { mutableStateOf(openLocalExplorerRequest || openLocalMusicRequest) }
+    var openMusicPlayerRequest by rememberSaveable { mutableIntStateOf(if (openLocalMusicRequest) 1 else 0) }
+    var currentAutoPlayFilePath by rememberSaveable { mutableStateOf(autoPlayFilePath) }
     val isLocked by securityViewModel.isLocked.collectAsState()
     val syncStatus by syncViewModel.status.collectAsState()
     val incomingTransfer by syncViewModel.incomingTransfer.collectAsState()
     val outgoingTransfer by syncViewModel.outgoingTransfer.collectAsState()
 
     var showThemesScreen by rememberSaveable { mutableStateOf(false) }
+    var triggerScanner by rememberSaveable { mutableStateOf(false) }
+    var pendingSearchRedirect by rememberSaveable { mutableStateOf(false) }
+    var triggerSearchKeyboard by rememberSaveable { mutableStateOf(false) }
+
+    var incomingOffsetY by remember { mutableStateOf(0f) }
+    var outgoingOffsetY by remember { mutableStateOf(0f) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(incomingTransfer?.id, incomingTransfer?.status) {
@@ -84,8 +107,54 @@ fun MainScreen(
             showThemesScreen = false
             selectedTab = 0
             showLocalExplorer = true
+            currentAutoPlayFilePath = autoPlayFilePath
             openMusicPlayerRequest++
             onOpenLocalMusicHandled()
+        }
+    }
+
+
+    LaunchedEffect(openLocalExplorerRequest) {
+        if (openLocalExplorerRequest) {
+            showThemesScreen = false
+            showLocalExplorer = true
+            onOpenLocalExplorerHandled()
+        }
+    }
+    LaunchedEffect(openScannerRequest) {
+        if (openScannerRequest) {
+            showThemesScreen = false
+            showLocalExplorer = false
+            selectedTab = 2 // Settings tab
+        }
+    }
+    LaunchedEffect(openOmniSearchRequest) {
+        if (openOmniSearchRequest) {
+            showThemesScreen = false
+            showLocalExplorer = false
+            if (syncStatus == ConnectionStatus.CONNECTED) {
+                selectedTab = 0
+                triggerSearchKeyboard = true
+            } else {
+                selectedTab = 2
+                triggerScanner = true
+                pendingSearchRedirect = true
+            }
+            onOpenOmniSearchHandled()
+        }
+    }
+
+    LaunchedEffect(syncStatus) {
+        if (syncStatus == ConnectionStatus.CONNECTED && pendingSearchRedirect) {
+            selectedTab = 0
+            pendingSearchRedirect = false
+            triggerSearchKeyboard = true
+        }
+    }
+    LaunchedEffect(openLocalSearchRequest) {
+        if (openLocalSearchRequest) {
+            showThemesScreen = false
+            showLocalExplorer = true
         }
     }
 
@@ -125,7 +194,13 @@ fun MainScreen(
                 onBackToPC = { showLocalExplorer = false },
                 onThemesClick = { showThemesScreen = true },
                 syncViewModel = syncViewModel,
-                openMusicPlayerRequest = openMusicPlayerRequest
+                openMusicPlayerRequest = openMusicPlayerRequest,
+                autoPlayFilePath = currentAutoPlayFilePath,
+                onAutoPlayHandled = { currentAutoPlayFilePath = null },
+                initialExplorerCategory = initialExplorerCategory,
+                onInitialCategoryHandled = onInitialCategoryHandled,
+                triggerLocalSearch = openLocalSearchRequest,
+                onTriggerLocalSearchHandled = onOpenLocalSearchHandled
             )
         } else {
             Scaffold(
@@ -216,6 +291,7 @@ fun MainScreen(
             ) { innerPadding ->
                 Box(
                     modifier = Modifier
+
                         .fillMaxSize()
                         .padding(innerPadding)
                 ) {
@@ -223,10 +299,20 @@ fun MainScreen(
                         when (selectedTab) {
                             0 -> SearchScreen(
                                 syncViewModel = syncViewModel,
-                                onOpenExplorer = { showLocalExplorer = true }
+                                onOpenExplorer = { showLocalExplorer = true },
+                                triggerAutoFocus = triggerSearchKeyboard,
+                                onTriggerAutoFocusHandled = { triggerSearchKeyboard = false }
                             )
                             1 -> PinnedScreen(syncViewModel = syncViewModel)
-                            2 -> SettingsScreen(syncViewModel = syncViewModel, securityViewModel = securityViewModel)
+                            2 -> SettingsScreen(
+                                syncViewModel = syncViewModel, 
+                                securityViewModel = securityViewModel,
+                                openScannerRequest = openScannerRequest || triggerScanner,
+                                onOpenScannerHandled = {
+                                    onOpenScannerHandled()
+                                    triggerScanner = false
+                                }
+                            )
                         }
                     }
                 }
@@ -242,6 +328,13 @@ fun MainScreen(
             }
             Card(
                 modifier = Modifier
+                    .offset { IntOffset(0, incomingOffsetY.roundToInt()) }
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            incomingOffsetY += dragAmount.y
+                        }
+                    }
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .statusBarsPadding()
@@ -299,6 +392,13 @@ fun MainScreen(
             }
             Card(
                 modifier = Modifier
+                    .offset { IntOffset(0, outgoingOffsetY.roundToInt()) }
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            outgoingOffsetY += dragAmount.y
+                        }
+                    }
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .statusBarsPadding()

@@ -90,8 +90,14 @@ class LocalMusicPlaybackService : Service() {
         if (file == null) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+            sendBroadcast(Intent("com.omnisearch.app.widget.MUSIC_ACTION_UPDATE").setPackage(packageName))
             return
         }
+
+        getSharedPreferences("omnisearch_local_explorer", Context.MODE_PRIVATE)
+            .edit()
+            .putString("last_played_music_file", file.absolutePath)
+            .apply()
 
         mediaSession.setMetadata(
             MediaMetadata.Builder()
@@ -144,6 +150,9 @@ class LocalMusicPlaybackService : Service() {
         )
 
         startForeground(NOTIFICATION_ID, buildNotification(file))
+
+        // Update widget
+        sendBroadcast(Intent("com.omnisearch.app.widget.MUSIC_ACTION_UPDATE").setPackage(packageName))
     }
 
     private fun buildNotification(file: File): Notification {
@@ -154,6 +163,7 @@ class LocalMusicPlaybackService : Service() {
                 Intent(this, MainActivity::class.java).apply {
                     action = ACTION_OPEN_LOCAL_MUSIC
                     putExtra(EXTRA_OPEN_LOCAL_MUSIC, true)
+                    putExtra("AUTO_PLAY_FILE_PATH", file.absolutePath)
                     flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 },
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -223,6 +233,7 @@ class LocalMusicPlaybackService : Service() {
         LocalMusicPlayerManager.stop()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+        sendBroadcast(Intent("com.omnisearch.app.widget.MUSIC_ACTION_UPDATE").setPackage(packageName))
     }
 
     private fun toggleCurrentFavorite() {

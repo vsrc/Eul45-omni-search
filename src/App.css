@@ -777,6 +777,41 @@ option {
   line-height: 1;
 }
 
+.search-input-folder-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: right 140ms ease, opacity 140ms ease;
+}
+
+.search-input-folder-btn svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 140ms ease;
+}
+
+.search-input-folder-btn:hover svg {
+  stroke: var(--accent);
+}
+
+:root[data-theme="light"] .search-input-folder-btn:hover svg {
+  stroke: #3b6fc0;
+}
+
 .filter-input-shell {
   position: relative;
   display: flex;
@@ -5146,3 +5181,172 @@ option {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+/* Selection overlay inside result preview and icons */
+.result-preview,
+.result-icon {
+  position: relative !important;
+}
+
+.bulk-checkbox-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+  transition: all 0.15s ease-in-out;
+  border-radius: inherit;
+  border: 1.5px solid rgba(255, 255, 255, 0.15);
+}
+
+.bulk-checkbox-overlay.is-selected {
+  background: color-mix(in srgb, var(--accent) 30%, rgba(0, 0, 0, 0.35)) !important;
+  border-color: var(--accent) !important;
+}
+
+.bulk-checkmark-icon {
+  color: var(--text-main);
+  font-size: 0.95rem;
+  font-weight: bold;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  user-select: none;
+}
+
+.result-row.is-bulk-selected {
+  background: color-mix(in srgb, var(--accent) 5%, transparent) !important;
+}
+
+/* Floating Bulk Action Bar */
+.bulk-action-bar {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--surface-strong) 92%, #000);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), 0 0 1px 1px rgba(255, 255, 255, 0.05);
+  z-index: 15;
+  width: calc(100% - 40px);
+  max-width: 600px;
+  backdrop-filter: blur(16px);
+  WebkitBackdropFilter: blur(16px);
+  animation: slideUpFade 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes slideUpFade {
+  from {
+    transform: translate(-50%, 15px);
+    opacity: 0;
+  }
+  to {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+}
+
+.bulk-action-summary {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.bulk-action-summary strong {
+  font-size: 1.1rem;
+  color: var(--accent);
+}
+
+.bulk-action-summary span {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.bulk-action-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.bulk-action-btn {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bulk-action-btn.primary {
+  background: var(--accent);
+  color: var(--text-main);
+}
+
+.bulk-action-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.bulk-action-btn.danger {
+  background: rgba(220, 53, 69, 0.2);
+  color: #ff4d4f;
+  border-color: rgba(220, 53, 69, 0.4);
+}
+
+.bulk-action-btn.danger:hover:not(:disabled) {
+  background: rgba(220, 53, 69, 0.35);
+  border-color: rgba(220, 53, 69, 0.6);
+}
+
+.bulk-action-btn.secondary {
+  background: color-mix(in srgb, var(--text-main) 10%, transparent);
+  color: var(--text-main);
+  border-color: var(--border-soft);
+}
+
+.bulk-action-btn.secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-main) 15%, transparent);
+}
+
+.bulk-action-btn.ghost {
+  background: none;
+  color: var(--text-muted);
+}
+
+.bulk-action-btn.ghost:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.bulk-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bulk-select-toggle-btn.is-active {
+  background: var(--accent) !important;
+  color: var(--text-main) !important;
+  border-color: var(--accent) !important;
+}
+
+.modal-card.rename-modal-card {
+  background: color-mix(in srgb, var(--surface-strong) 98%, #000) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.ghost-button.is-active-tab-sync {
+  background: var(--accent) !important;
+  color: var(--text-main) !important;
+  border-color: var(--accent) !important;
+}
+

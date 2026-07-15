@@ -1033,7 +1033,7 @@ pub fn transfer_snapshots(sync_state: &SyncState) -> Vec<MobileTransferSnapshot>
 }
 
 pub fn queue_file_transfer(
-    sync_state: Arc<SyncState>,
+    sync_state: &SyncState,
     path: &str,
 ) -> Result<MobileTransferSnapshot, String> {
     let connected_clients = *sync_state
@@ -1119,7 +1119,7 @@ fn next_transfer_for_device(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let transfer = transfers.iter_mut().find(|transfer| {
-        matches!(transfer.status, MobileTransferStatus::Queued | MobileTransferStatus::Sending)
+        matches!(transfer.status, MobileTransferStatus::Queued)
             && transfer
                 .assigned_device_id
                 .as_deref()
@@ -1340,6 +1340,16 @@ fn handle_client(stream: TcpStream, sync_state: Arc<SyncState>) {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *count = count.saturating_sub(1);
+    }
+
+    if let Some(ref device_id) = approved_device_id {
+        if let Ok(mut transfers) = sync_state.file_transfers.lock() {
+            for t in transfers.iter_mut() {
+                if t.assigned_device_id.as_deref() == Some(device_id) && t.status == MobileTransferStatus::Sending {
+                    t.status = MobileTransferStatus::Queued;
+                }
+            }
+        }
     }
 
     eprintln!("[OmniSearch Sync] Client disconnected: {peer}");
@@ -1683,6 +1693,18 @@ fn handle_sync_message(
                             success: false,
                             message: format!("Failed to reveal path: {:?}", outcome.err()),
                         }
+                    }
+                }
+                "transfer_to_phone" => {
+                    match queue_file_transfer(sync_state, &authorized_path_string) {
+                        Ok(_) => SyncMessage::Confirm {
+                            success: true,
+                            message: "File transfer queued successfully.".to_string(),
+                        },
+                        Err(message) => SyncMessage::Confirm {
+                            success: false,
+                            message,
+                        },
                     }
                 }
                 "delete" => {

@@ -17,6 +17,7 @@ class PreferencesManager(private val context: Context) {
         private val APP_LOCK_BIOMETRIC = booleanPreferencesKey("app_lock_biometric")
         private val DEVICE_ID = stringPreferencesKey("device_id")
         private val ACTIVE_SEARCH_DRIVE = stringPreferencesKey("active_search_drive")
+
         private val SHOW_HIDDEN_FILES = booleanPreferencesKey("show_hidden_files")
         private val SORT_TYPE = stringPreferencesKey("sort_type")
         private val SORT_ASCENDING = booleanPreferencesKey("sort_ascending")
@@ -25,8 +26,17 @@ class PreferencesManager(private val context: Context) {
         private val USE_IMAGE_ALBUMS = booleanPreferencesKey("use_image_albums")
         private val IMAGE_SORT_TYPE = stringPreferencesKey("image_sort_type")
         private val IMAGE_SORT_ASCENDING = booleanPreferencesKey("image_sort_ascending")
+        private val VIDEO_SORT_TYPE = stringPreferencesKey("video_sort_type")
+        private val VIDEO_SORT_ASCENDING = booleanPreferencesKey("video_sort_ascending")
+        private val AUDIO_SORT_TYPE = stringPreferencesKey("audio_sort_type")
+        private val AUDIO_SORT_ASCENDING = booleanPreferencesKey("audio_sort_ascending")
+        private val DOCUMENT_SORT_TYPE = stringPreferencesKey("document_sort_type")
+        private val DOCUMENT_SORT_ASCENDING = booleanPreferencesKey("document_sort_ascending")
+        private val USE_AUDIO_ALBUMS = booleanPreferencesKey("use_audio_albums")
         private val THEME_MODE = stringPreferencesKey("theme_mode")
         private val THEME_COLOR = stringPreferencesKey("theme_color")
+        private val FAVORITES_SORT_TYPE = stringPreferencesKey("favorites_sort_type")
+        private val FAVORITES_SORT_ASCENDING = booleanPreferencesKey("favorites_sort_ascending")
     }
 
     val themeModeFlow: Flow<String> = context.dataStore.data.map { preferences ->
@@ -129,6 +139,96 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    val videoSortTypeFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[VIDEO_SORT_TYPE] ?: "NAME"
+    }
+
+    suspend fun saveVideoSortType(type: String) {
+        context.dataStore.edit { preferences ->
+            preferences[VIDEO_SORT_TYPE] = type
+        }
+    }
+
+    val videoSortAscendingFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[VIDEO_SORT_ASCENDING] ?: true
+    }
+
+    suspend fun saveVideoSortAscending(ascending: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[VIDEO_SORT_ASCENDING] = ascending
+        }
+    }
+
+    val audioSortTypeFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[AUDIO_SORT_TYPE] ?: "NAME"
+    }
+
+    suspend fun saveAudioSortType(type: String) {
+        context.dataStore.edit { preferences ->
+            preferences[AUDIO_SORT_TYPE] = type
+        }
+    }
+
+    val audioSortAscendingFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[AUDIO_SORT_ASCENDING] ?: true
+    }
+
+    suspend fun saveAudioSortAscending(ascending: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[AUDIO_SORT_ASCENDING] = ascending
+        }
+    }
+
+    val documentSortTypeFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[DOCUMENT_SORT_TYPE] ?: "NAME"
+    }
+
+    suspend fun saveDocumentSortType(type: String) {
+        context.dataStore.edit { preferences ->
+            preferences[DOCUMENT_SORT_TYPE] = type
+        }
+    }
+
+    val documentSortAscendingFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[DOCUMENT_SORT_ASCENDING] ?: true
+    }
+
+    suspend fun saveDocumentSortAscending(ascending: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[DOCUMENT_SORT_ASCENDING] = ascending
+        }
+    }
+
+    val favoritesSortTypeFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[FAVORITES_SORT_TYPE] ?: "NAME"
+    }
+
+    suspend fun saveFavoritesSortType(type: String) {
+        context.dataStore.edit { preferences ->
+            preferences[FAVORITES_SORT_TYPE] = type
+        }
+    }
+
+    val favoritesSortAscendingFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[FAVORITES_SORT_ASCENDING] ?: true
+    }
+
+    suspend fun saveFavoritesSortAscending(ascending: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[FAVORITES_SORT_ASCENDING] = ascending
+        }
+    }
+
+    val useAudioAlbumsFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[USE_AUDIO_ALBUMS] ?: true
+    }
+
+    suspend fun saveUseAudioAlbums(albums: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[USE_AUDIO_ALBUMS] = albums
+        }
+    }
+
     val activeSearchDriveFlow: Flow<String> = context.dataStore.data.map { preferences ->
         preferences[ACTIVE_SEARCH_DRIVE] ?: "C"
     }
@@ -142,7 +242,6 @@ class PreferencesManager(private val context: Context) {
     val omniSearchAddressFlow: Flow<String> = context.dataStore.data.map { preferences ->
         preferences[OMNISEARCH_ADDRESS] ?: ""
     }
-
     suspend fun saveAddress(address: String) {
         context.dataStore.edit { preferences ->
             preferences[OMNISEARCH_ADDRESS] = address

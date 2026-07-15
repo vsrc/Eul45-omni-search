@@ -42,6 +42,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.pager.HorizontalPager
@@ -377,6 +378,14 @@ private data class ImageAlbum(
         val lastModified: Long
 )
 
+private data class AudioAlbum(
+        val name: String,
+        val directory: File,
+        val firstSongFile: File,
+        val count: Int,
+        val lastModified: Long
+)
+
 private data class BatchFileProgress(
         val title: String,
         val completed: Int,
@@ -445,6 +454,12 @@ fun LocalExplorerScreen(
         onThemesClick: () -> Unit,
         syncViewModel: SyncViewModel,
         openMusicPlayerRequest: Int = 0,
+        autoPlayFilePath: String? = null,
+        onAutoPlayHandled: () -> Unit = {},
+        initialExplorerCategory: String? = null,
+        onInitialCategoryHandled: () -> Unit = {},
+        triggerLocalSearch: Boolean = false,
+        onTriggerLocalSearchHandled: () -> Unit = {},
         modifier: Modifier = Modifier
 ) {
         val context = LocalContext.current
@@ -453,12 +468,51 @@ fun LocalExplorerScreen(
         val isConnectedToDesktop = syncStatus == ConnectionStatus.CONNECTED
 
         // Navigation and state
-        var currentView by remember { mutableStateOf(ExplorerView.HOME) }
-        var currentDirectory by remember {
-                mutableStateOf(File(Environment.getExternalStorageDirectory().absolutePath))
+        var currentView by remember { 
+            mutableStateOf(
+                when (initialExplorerCategory?.lowercase()) {
+                    "internal", "downloads" -> ExplorerView.DIRECTORY
+                    "images", "documents", "audio", "videos", "archives", "apks" -> ExplorerView.CATEGORY
+                    else -> ExplorerView.HOME
+                }
+            ) 
         }
-        var currentCategoryName by remember { mutableStateOf("") }
-        var currentCategoryExtensions by remember { mutableStateOf<List<String>>(emptyList()) }
+        var currentDirectory by remember {
+                mutableStateOf(
+                    if (initialExplorerCategory?.lowercase() == "downloads") {
+                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    } else {
+                        File(Environment.getExternalStorageDirectory().absolutePath)
+                    }
+                )
+        }
+        var currentCategoryName by remember { 
+            mutableStateOf(
+                when (initialExplorerCategory?.lowercase()) {
+                    "images" -> "Images"
+                    "documents" -> "Documents"
+                    "audio" -> "Audio"
+                    "videos" -> "Videos"
+                    "archives" -> "Archives"
+                    "apks" -> "APKs"
+                    else -> ""
+                }
+            ) 
+        }
+        var currentCategoryExtensions by remember { 
+            mutableStateOf<List<String>>(
+                when (initialExplorerCategory?.lowercase()) {
+                    "images" -> listOf("jpg", "jpeg", "png", "webp", "bmp", "gif")
+                    "documents" -> listOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt")
+                    "audio" -> listOf("mp3", "wav", "ogg", "flac", "m4a", "aac")
+                    "videos" -> listOf("mp4", "mkv", "avi", "mov", "webm", "3gp")
+                    "archives" -> listOf("zip", "rar", "7z", "tar", "gz")
+                    "apks" -> listOf("apk", "xapk", "apks")
+                    else -> emptyList()
+                }
+            ) 
+        }
+
 
         // Explorer State variables (Saved to/Loaded from Preferences DataStore)
         val prefsManager = remember { com.omnisearch.app.data.PreferencesManager(context) }
@@ -469,35 +523,57 @@ fun LocalExplorerScreen(
         val useFavoritesGridState = prefsManager.useFavoritesGridFlow.collectAsState(initial = false)
         val useImageAlbumsState = prefsManager.useImageAlbumsFlow.collectAsState(initial = true)
         val imageSortTypeState = prefsManager.imageSortTypeFlow.collectAsState(initial = "DATE")
-        val imageSortAscendingState =
-                prefsManager.imageSortAscendingFlow.collectAsState(initial = false)
+        val imageSortAscendingState = prefsManager.imageSortAscendingFlow.collectAsState(initial = false)
+        val videoSortTypeState = prefsManager.videoSortTypeFlow.collectAsState(initial = "NAME")
+        val videoSortAscendingState = prefsManager.videoSortAscendingFlow.collectAsState(initial = true)
+        val audioSortTypeState = prefsManager.audioSortTypeFlow.collectAsState(initial = "NAME")
+        val audioSortAscendingState = prefsManager.audioSortAscendingFlow.collectAsState(initial = true)
+        val documentSortTypeState = prefsManager.documentSortTypeFlow.collectAsState(initial = "NAME")
+        val documentSortAscendingState = prefsManager.documentSortAscendingFlow.collectAsState(initial = true)
+        val useAudioAlbumsState = prefsManager.useAudioAlbumsFlow.collectAsState(initial = true)
+        val favoritesSortTypeState = prefsManager.favoritesSortTypeFlow.collectAsState(initial = "NAME")
+        val favoritesSortAscendingState = prefsManager.favoritesSortAscendingFlow.collectAsState(initial = true)
 
         val showHiddenFiles = showHiddenFilesState.value
-        val sortType =
-                remember(sortTypeState.value) {
-                        try {
-                                FileSortType.valueOf(sortTypeState.value)
-                        } catch (e: Exception) {
-                                FileSortType.NAME
-                        }
+        val activeSortType = remember(currentView, currentCategoryName, sortTypeState.value, imageSortTypeState.value, videoSortTypeState.value, audioSortTypeState.value, documentSortTypeState.value, favoritesSortTypeState.value) {
+            try {
+                when {
+                    currentView == ExplorerView.CATEGORY && currentCategoryName == "Images" -> FileSortType.valueOf(imageSortTypeState.value)
+                    currentView == ExplorerView.CATEGORY && currentCategoryName == "Videos" -> FileSortType.valueOf(videoSortTypeState.value)
+                    currentView == ExplorerView.CATEGORY && currentCategoryName == "Audio" -> FileSortType.valueOf(audioSortTypeState.value)
+                    currentView == ExplorerView.CATEGORY && currentCategoryName == "Documents" -> FileSortType.valueOf(documentSortTypeState.value)
+                    currentView == ExplorerView.FAVORITES -> FileSortType.valueOf(favoritesSortTypeState.value)
+                    else -> FileSortType.valueOf(sortTypeState.value)
                 }
-        val sortAscending = sortAscendingState.value
+            } catch (e: Exception) {
+                FileSortType.NAME
+            }
+        }
+        val activeSortAscending = remember(currentView, currentCategoryName, sortAscendingState.value, imageSortAscendingState.value, videoSortAscendingState.value, audioSortAscendingState.value, documentSortAscendingState.value, favoritesSortAscendingState.value) {
+            when {
+                currentView == ExplorerView.CATEGORY && currentCategoryName == "Images" -> imageSortAscendingState.value
+                currentView == ExplorerView.CATEGORY && currentCategoryName == "Videos" -> videoSortAscendingState.value
+                currentView == ExplorerView.CATEGORY && currentCategoryName == "Audio" -> audioSortAscendingState.value
+                currentView == ExplorerView.CATEGORY && currentCategoryName == "Documents" -> documentSortAscendingState.value
+                currentView == ExplorerView.FAVORITES -> favoritesSortAscendingState.value
+                else -> sortAscendingState.value
+            }
+        }
         val useVideoGrid = useVideoGridState.value
         val useFavoritesGrid = useFavoritesGridState.value
         val useImageAlbums = useImageAlbumsState.value
-        val imageSortType =
-                remember(imageSortTypeState.value) {
-                        try {
-                                FileSortType.valueOf(imageSortTypeState.value)
-                        } catch (e: Exception) {
-                                FileSortType.DATE
-                        }
-                }
+        val useAudioAlbums = useAudioAlbumsState.value
+
+        val sortType = try { FileSortType.valueOf(sortTypeState.value) } catch (e: Exception) { FileSortType.NAME }
+        val sortAscending = sortAscendingState.value
+        val imageSortType = try { FileSortType.valueOf(imageSortTypeState.value) } catch (e: Exception) { FileSortType.DATE }
         val imageSortAscending = imageSortAscendingState.value
 
         var searchQuery by remember { mutableStateOf("") }
         var selectedImageAlbum by remember { mutableStateOf<ImageAlbum?>(null) }
         var selectedAlbumForActions by remember { mutableStateOf<ImageAlbum?>(null) }
+        var selectedAudioAlbum by remember { mutableStateOf<AudioAlbum?>(null) }
+        var selectedAudioAlbumForActions by remember { mutableStateOf<AudioAlbum?>(null) }
 
         // Multi-select actions
         val selectedFiles = remember { mutableStateListOf<File>() }
@@ -513,7 +589,9 @@ fun LocalExplorerScreen(
         var showDetailsDialog by remember { mutableStateOf<File?>(null) }
         var filesToDelete by remember { mutableStateOf<List<File>?>(null) }
         var showAlbumRenameDialog by remember { mutableStateOf<ImageAlbum?>(null) }
+        var showAudioAlbumRenameDialog by remember { mutableStateOf<AudioAlbum?>(null) }
         var showAlbumDetailsDialog by remember { mutableStateOf<ImageAlbum?>(null) }
+        var showAudioAlbumDetailsDialog by remember { mutableStateOf<AudioAlbum?>(null) }
         var albumPinRequest by remember { mutableStateOf<AlbumPinRequest?>(null) }
         var showAlbumBiometricEnablePrompt by remember { mutableStateOf(false) }
         var albumLocksRevision by remember { mutableIntStateOf(0) }
@@ -529,10 +607,36 @@ fun LocalExplorerScreen(
         var showMusicPlayerExpanded by remember { mutableStateOf(false) }
 
         LaunchedEffect(openMusicPlayerRequest) {
-                if (openMusicPlayerRequest > 0 &&
-                                LocalMusicPlayerManager.currentPlayingFile != null
-                ) {
-                        showMusicPlayerExpanded = true
+                if (openMusicPlayerRequest > 0) {
+                        var songFile: File? = null
+                        if (LocalMusicPlayerManager.currentPlayingFile != null) {
+                                // Already playing something - just show the expanded player
+                                showMusicPlayerExpanded = true
+                                songFile = LocalMusicPlayerManager.currentPlayingFile
+                        } else if (autoPlayFilePath != null) {
+                                // Service is dead but we have a file path from widget - auto-play it
+                                val fileToPlay = java.io.File(autoPlayFilePath)
+                                if (fileToPlay.exists()) {
+                                        val musicFiles = fileToPlay.parentFile
+                                                ?.listFiles()
+                                                ?.filter { it.isFile && it.extension.lowercase() in LOCAL_AUDIO_EXTENSIONS }
+                                                ?.sortedBy { it.name.lowercase() }
+                                                ?.toList()
+                                                ?: listOf(fileToPlay)
+                                        LocalMusicPlayerManager.play(fileToPlay, musicFiles)
+                                        LocalMusicPlaybackService.start(context)
+                                        showMusicPlayerExpanded = true
+                                        songFile = fileToPlay
+                                }
+                                onAutoPlayHandled()
+                        }
+                        // Pre-select the audio album so the user lands inside it
+                        if (songFile != null && useAudioAlbums) {
+                                val dir = songFile.parentFile
+                                if (dir != null && dir.exists()) {
+                                        selectedAudioAlbum = AudioAlbum(dir.name, dir, songFile, 1, dir.lastModified())
+                                }
+                        }
                 }
         }
 
@@ -540,6 +644,8 @@ fun LocalExplorerScreen(
         var directoryFiles by remember { mutableStateOf<List<File>>(emptyList()) }
         var recentFilesList by remember { mutableStateOf<List<File>>(emptyList()) }
         var favoritesList by remember { mutableStateOf<List<File>>(emptyList()) }
+        val favoritesFilterTabs = remember { listOf("All", "Images", "Audio", "Video", "Other files") }
+        var selectedFavoritesTab by remember { mutableStateOf(favoritesFilterTabs[0]) }
         var trashItems by remember {
                 mutableStateOf<List<LocalTrashManager.TrashItem>>(emptyList())
         }
@@ -547,6 +653,80 @@ fun LocalExplorerScreen(
         var directorySearchResults by remember { mutableStateOf<List<File>>(emptyList()) }
         var isDirectorySearchLoading by remember { mutableStateOf(false) }
         var isLoading by remember { mutableStateOf(false) }
+
+        var forceReloadTrigger by remember { mutableIntStateOf(0) }
+
+        
+
+        var forceSearchActive by remember { mutableStateOf(triggerLocalSearch) }
+
+        LaunchedEffect(triggerLocalSearch) {
+                if (triggerLocalSearch) {
+                        forceSearchActive = true
+                        onTriggerLocalSearchHandled()
+                }
+        }
+
+        // Handle widget deep-link navigation
+        LaunchedEffect(initialExplorerCategory) {
+            if (initialExplorerCategory != null) {
+                when (initialExplorerCategory.lowercase()) {
+                    "internal" -> {
+                        searchQuery = ""
+                        currentView = ExplorerView.DIRECTORY
+                        currentDirectory = File(Environment.getExternalStorageDirectory().absolutePath)
+                    }
+                    "downloads" -> {
+                        searchQuery = ""
+                        currentView = ExplorerView.DIRECTORY
+                        currentDirectory = Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_DOWNLOADS
+                        )
+                    }
+                    "images" -> {
+                        searchQuery = ""
+                        selectedImageAlbum = null
+                        selectedAudioAlbum = null
+                        categoryFilesList = emptyList()
+                        currentCategoryName = "Images"
+                        currentCategoryExtensions = listOf("jpg", "jpeg", "png", "webp", "bmp", "gif")
+                        currentView = ExplorerView.CATEGORY
+                    }
+                    "documents" -> {
+                        searchQuery = ""
+                        selectedImageAlbum = null
+                        selectedAudioAlbum = null
+                        categoryFilesList = emptyList()
+                        currentCategoryName = "Documents"
+                        currentCategoryExtensions = listOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt")
+                        currentView = ExplorerView.CATEGORY
+                    }
+                    "music" -> {
+                        searchQuery = ""
+                        selectedImageAlbum = null
+                        
+                        val playingFile = LocalMusicPlayerManager.currentPlayingFile ?: (if (autoPlayFilePath != null) File(autoPlayFilePath) else null)
+                        if (useAudioAlbums && playingFile != null && playingFile.exists()) {
+                            val dir = playingFile.parentFile
+                            if (dir != null) {
+                                selectedAudioAlbum = AudioAlbum(dir.name, dir, playingFile, 1, dir.lastModified())
+                            } else {
+                                selectedAudioAlbum = null
+                            }
+                        } else {
+                            selectedAudioAlbum = null
+                        }
+                        
+                        categoryFilesList = emptyList()
+                        currentCategoryName = "Audio"
+                        currentCategoryExtensions = listOf("mp3", "wav", "m4a", "flac", "ogg", "aac")
+                        currentView = ExplorerView.CATEGORY
+                    }
+                }
+                forceReloadTrigger++
+                onInitialCategoryHandled()
+            }
+        }
         val albumSecurityPrefs =
                 remember {
                         context.getSharedPreferences(
@@ -938,7 +1118,7 @@ fun LocalExplorerScreen(
                 coroutineScope.launch(Dispatchers.IO) {
                         val list = mutableListOf<File>()
                         try {
-                                // 1. Query MediaStore
+                                // 1. Query MediaStore for ALL file types (not just media)
                                 val uri = MediaStore.Files.getContentUri("external")
                                 val projection =
                                         arrayOf(
@@ -946,7 +1126,7 @@ fun LocalExplorerScreen(
                                                 MediaStore.Files.FileColumns.DATE_MODIFIED
                                         )
                                 val sortOrder =
-                                        "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC LIMIT 50"
+                                        "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC LIMIT 200"
                                 val cursor =
                                         context.contentResolver.query(
                                                 uri,
@@ -961,7 +1141,7 @@ fun LocalExplorerScreen(
                                                         MediaStore.Files.FileColumns.DATA
                                                 )
                                         while (c.moveToNext()) {
-                                                val path = c.getString(dataIdx)
+                                                val path = c.getString(dataIdx) ?: continue
                                                 val file = File(path)
                                                 if (file.exists() &&
                                                                 file.isFile &&
@@ -976,9 +1156,13 @@ fun LocalExplorerScreen(
                         }
 
                         // 2. Direct filesystem scan of major directories (2 levels deep) for
-                        // real-time accuracy
+                        // real-time accuracy — includes OmniSearch transfer folders, Bluetooth,
+                        // and other common locations for sideloaded / USB-transferred files
+                        val externalRoot = Environment.getExternalStorageDirectory()
                         val scanDirs =
                                 listOf(
+                                        // Internal storage root (catches files placed directly at /storage/emulated/0/)
+                                        externalRoot,
                                         Environment.getExternalStoragePublicDirectory(
                                                 Environment.DIRECTORY_DOWNLOADS
                                         ),
@@ -996,7 +1180,16 @@ fun LocalExplorerScreen(
                                         ),
                                         Environment.getExternalStoragePublicDirectory(
                                                 Environment.DIRECTORY_MOVIES
-                                        )
+                                        ),
+                                        // OmniSearch transfer destinations
+                                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "OmniSearch"),
+                                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "OmniSearch"),
+                                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "OmniSearch"),
+                                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "OmniSearch"),
+                                        // Bluetooth & other common transfer folders
+                                        File(externalRoot, "Bluetooth"),
+                                        File(externalRoot, "bluetooth"),
+                                        File(externalRoot, "Android/media"),
                                 )
 
                         val fsFiles = mutableListOf<File>()
@@ -1033,7 +1226,7 @@ fun LocalExplorerScreen(
                                                         !isInLockedAlbum(it, hiddenAlbumPaths)
                                         }
                                         .sortedByDescending { it.lastModified() }
-                                        .take(15)
+                                        .take(40)
 
                         withContext(Dispatchers.Main) {
                                 recentFilesList = combined
@@ -1140,7 +1333,7 @@ fun LocalExplorerScreen(
         }
 
         // Trigger loads on screen changes
-        LaunchedEffect(currentView, currentDirectory, hasPermission) {
+        LaunchedEffect(currentView, currentDirectory, currentCategoryName, hasPermission, forceReloadTrigger) {
                 if (hasPermission) {
                         when (currentView) {
                                 ExplorerView.HOME -> {
@@ -1191,7 +1384,7 @@ fun LocalExplorerScreen(
                 isDirectorySearchLoading = false
         }
 
-        LaunchedEffect(currentView, currentCategoryName, useImageAlbums) {
+        LaunchedEffect(currentView, currentCategoryName, useImageAlbums, useAudioAlbums) {
                 if (currentView != ExplorerView.CATEGORY ||
                                 currentCategoryName != "Images" ||
                                 !useImageAlbums
@@ -1200,17 +1393,28 @@ fun LocalExplorerScreen(
                         selectedAlbumForActions = null
                         unlockedAlbumPaths.clear()
                 }
+                if (currentView != ExplorerView.CATEGORY ||
+                                currentCategoryName != "Audio" ||
+                                !useAudioAlbums
+                ) {
+                        selectedAudioAlbum = null
+                        selectedAudioAlbumForActions = null
+                }
         }
 
         val handleBackNavigation = {
                 if (selectedAlbumForActions != null) {
                         selectedAlbumForActions = null
+                } else if (selectedAudioAlbumForActions != null) {
+                        selectedAudioAlbumForActions = null
                 } else if (isMultiSelectMode) {
                         isMultiSelectMode = false
                         selectedFiles.clear()
                 } else if (selectedImageAlbum != null) {
                         selectedImageAlbum?.directory?.absolutePath?.let { unlockedAlbumPaths.remove(it) }
                         selectedImageAlbum = null
+                } else if (selectedAudioAlbum != null) {
+                        selectedAudioAlbum = null
                 } else {
                         searchQuery = "" // Reset search query when navigating back
                         when (currentView) {
@@ -1371,6 +1575,9 @@ fun LocalExplorerScreen(
                         currentView == ExplorerView.CATEGORY &&
                                 currentCategoryName == "Images" &&
                                 selectedImageAlbum != null -> selectedImageAlbum?.directory
+                        currentView == ExplorerView.CATEGORY &&
+                                currentCategoryName == "Audio" &&
+                                selectedAudioAlbum != null -> selectedAudioAlbum?.directory
                         else -> null
                 }
 
@@ -1724,8 +1931,60 @@ fun LocalExplorerScreen(
                                 if (imageSortAscending) sorted else sorted.reversed()
                         }
 
+        fun audioAlbumFiles(album: AudioAlbum): List<File> =
+                categoryFilesList.filter { file ->
+                        file.isFile &&
+                                (showHiddenFiles || !file.name.startsWith(".")) &&
+                                file.parentFile?.absolutePath == album.directory.absolutePath &&
+                                file.extension.lowercase() in LOCAL_AUDIO_EXTENSIONS
+                }
+
+        fun isAudioAlbumPinned(album: AudioAlbum): Boolean =
+                pinnedAlbumPaths.contains(album.directory.absolutePath)
+
+        fun setAudioAlbumPinned(album: AudioAlbum, pinned: Boolean) {
+                val updated = pinnedAlbumPaths.toMutableSet()
+                if (pinned) {
+                        updated.add(album.directory.absolutePath)
+                } else {
+                        updated.remove(album.directory.absolutePath)
+                }
+                savePinnedAlbumPaths(albumSecurityPrefs, updated)
+                albumLocksRevision++
+        }
+
+        fun renameAudioAlbum(album: AudioAlbum, newName: String) {
+                val cleaned = newName.trim()
+                if (cleaned.isBlank()) return
+                val destination = File(album.directory.parentFile, cleaned)
+                if (destination.exists()) {
+                        Toast.makeText(context, "An album with this name already exists", Toast.LENGTH_SHORT)
+                                .show()
+                        return
+                }
+                if (album.directory.renameTo(destination)) {
+                        val pinned = pinnedAlbumPaths.contains(album.directory.absolutePath)
+                        if (pinned) {
+                                val updated = pinnedAlbumPaths.toMutableSet()
+                                updated.remove(album.directory.absolutePath)
+                                updated.add(destination.absolutePath)
+                                savePinnedAlbumPaths(albumSecurityPrefs, updated)
+                                albumLocksRevision++
+                        }
+                        selectedAudioAlbum = null
+                        selectedAudioAlbumForActions = null
+                        loadCategoryFiles()
+                        loadFavorites()
+                        Toast.makeText(context, "Album renamed", Toast.LENGTH_SHORT).show()
+                } else {
+                        Toast.makeText(context, "Failed to rename album folder", Toast.LENGTH_SHORT)
+                                .show()
+                }
+        }
+
         fun clearAlbumSelection() {
                 selectedAlbumForActions = null
+                selectedAudioAlbumForActions = null
         }
 
         fun setAlbumLocked(album: ImageAlbum, locked: Boolean) {
@@ -1919,34 +2178,29 @@ fun LocalExplorerScreen(
                                                         prefsManager.saveShowHiddenFiles(value)
                                                 }
                                         },
-                                        sortType = if (isImagesCategory) imageSortType else sortType,
+                                        sortType = activeSortType,
                                         onSortTypeChange = { value ->
                                                 coroutineScope.launch {
-                                                        if (isImagesCategory) {
-                                                                prefsManager.saveImageSortType(
-                                                                        value.name
-                                                                )
-                                                        } else {
-                                                                prefsManager.saveSortType(
-                                                                        value.name
-                                                                )
+                                                        when {
+                                                                currentView == ExplorerView.CATEGORY && currentCategoryName == "Images" -> prefsManager.saveImageSortType(value.name)
+                                                                currentView == ExplorerView.CATEGORY && currentCategoryName == "Videos" -> prefsManager.saveVideoSortType(value.name)
+                                                                currentView == ExplorerView.CATEGORY && currentCategoryName == "Audio" -> prefsManager.saveAudioSortType(value.name)
+                                                                currentView == ExplorerView.CATEGORY && currentCategoryName == "Documents" -> prefsManager.saveDocumentSortType(value.name)
+                                                                currentView == ExplorerView.FAVORITES -> prefsManager.saveFavoritesSortType(value.name)
+                                                                else -> prefsManager.saveSortType(value.name)
                                                         }
                                                 }
                                         },
-                                        sortAscending =
-                                                if (isImagesCategory) imageSortAscending
-                                                else sortAscending,
+                                        sortAscending = activeSortAscending,
                                         onToggleSortOrder = {
                                                 coroutineScope.launch {
-                                                        if (isImagesCategory) {
-                                                                prefsManager
-                                                                        .saveImageSortAscending(
-                                                                                !imageSortAscending
-                                                                        )
-                                                        } else {
-                                                                prefsManager.saveSortAscending(
-                                                                        !sortAscending
-                                                                )
+                                                        when {
+                                                                currentView == ExplorerView.CATEGORY && currentCategoryName == "Images" -> prefsManager.saveImageSortAscending(!imageSortAscendingState.value)
+                                                                currentView == ExplorerView.CATEGORY && currentCategoryName == "Videos" -> prefsManager.saveVideoSortAscending(!videoSortAscendingState.value)
+                                                                currentView == ExplorerView.CATEGORY && currentCategoryName == "Audio" -> prefsManager.saveAudioSortAscending(!audioSortAscendingState.value)
+                                                                currentView == ExplorerView.CATEGORY && currentCategoryName == "Documents" -> prefsManager.saveDocumentSortAscending(!documentSortAscendingState.value)
+                                                                currentView == ExplorerView.FAVORITES -> prefsManager.saveFavoritesSortAscending(!favoritesSortAscendingState.value)
+                                                                else -> prefsManager.saveSortAscending(!sortAscendingState.value)
                                                         }
                                                 }
                                         },
@@ -1992,6 +2246,17 @@ fun LocalExplorerScreen(
                                                         )
                                                 }
                                         },
+                                        isAudioCategory =
+                                                currentView == ExplorerView.CATEGORY &&
+                                                        currentCategoryName == "Audio",
+                                        useAudioAlbums = useAudioAlbums,
+                                        onToggleAudioAlbums = {
+                                                coroutineScope.launch {
+                                                        prefsManager.saveUseAudioAlbums(
+                                                                !useAudioAlbums
+                                                        )
+                                                }
+                                        },
                                         isConnectedToDesktop = isConnectedToDesktop,
                                         onSendToDesktop = {
                                                 val filesToSend =
@@ -2013,7 +2278,8 @@ fun LocalExplorerScreen(
                                                                 .show()
                                                 }
                                         },
-                                        hasSelectedFiles = selectedFiles.isNotEmpty()
+                                        hasSelectedFiles = selectedFiles.isNotEmpty(),
+                                        forceSearchActive = forceSearchActive
                                 )
 
                                 Box(modifier = Modifier.weight(1f)) {
@@ -2658,15 +2924,64 @@ fun LocalExplorerScreen(
                                                         )
                                                 }
                                                 ExplorerView.FAVORITES -> {
+                                                        val filteredFavorites = remember(favoritesList, selectedFavoritesTab) {
+                                                                when (selectedFavoritesTab) {
+                                                                        "Images" -> favoritesList.filter { file ->
+                                                                                file.extension.lowercase() in listOf("jpg", "jpeg", "png", "webp", "gif")
+                                                                        }
+                                                                        "Audio" -> favoritesList.filter { file ->
+                                                                                file.extension.lowercase() in LOCAL_AUDIO_EXTENSIONS
+                                                                        }
+                                                                        "Video" -> favoritesList.filter { file ->
+                                                                                file.extension.lowercase() in listOf("mp4", "mkv", "avi", "mov", "webm", "3gp")
+                                                                        }
+                                                                        "Other files" -> favoritesList.filter { file ->
+                                                                                val ext = file.extension.lowercase()
+                                                                                ext !in listOf("jpg", "jpeg", "png", "webp", "gif") &&
+                                                                                ext !in LOCAL_AUDIO_EXTENSIONS &&
+                                                                                ext !in listOf("mp4", "mkv", "avi", "mov", "webm", "3gp")
+                                                                        }
+                                                                        else -> favoritesList
+                                                                }
+                                                        }
+
                                                         val sorted =
                                                                 remember(
-                                                                        favoritesList,
+                                                                        filteredFavorites,
                                                                         searchQuery,
                                                                         sortType,
                                                                         sortAscending
-                                                                ) { sortFileList(favoritesList) }
-                                                        DirectoryViewer(
-                                                                files = sorted,
+                                                                ) { sortFileList(filteredFavorites) }
+
+                                                        Column(modifier = Modifier.fillMaxSize()) {
+                                                                ScrollableTabRow(
+                                                                        selectedTabIndex = favoritesFilterTabs.indexOf(selectedFavoritesTab),
+                                                                        containerColor = Color.Transparent,
+                                                                        contentColor = FluentTheme.colors.accent,
+                                                                        divider = {},
+                                                                        edgePadding = FluentTheme.dims.paddingMedium,
+                                                                        modifier = Modifier.fillMaxWidth()
+                                                                ) {
+                                                                        favoritesFilterTabs.forEach { tab ->
+                                                                                val selected = selectedFavoritesTab == tab
+                                                                                Tab(
+                                                                                        selected = selected,
+                                                                                        onClick = { selectedFavoritesTab = tab },
+                                                                                        text = {
+                                                                                                Text(
+                                                                                                        text = tab,
+                                                                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                                                                                        fontSize = 14.sp,
+                                                                                                        color = if (selected) FluentTheme.colors.accent else FluentTheme.colors.textMuted
+                                                                                                )
+                                                                                        }
+                                                                                )
+                                                                        }
+                                                                }
+
+                                                                Box(modifier = Modifier.weight(1f)) {
+                                                                        DirectoryViewer(
+                                                                                files = sorted,
                                                                 selectedFiles = selectedFiles,
                                                                 isMultiSelectMode =
                                                                         isMultiSelectMode,
@@ -2799,29 +3114,21 @@ fun LocalExplorerScreen(
                                                                 isConnectedToDesktop =
                                                                         isConnectedToDesktop
                                                         )
+                                                                }
+                                                        }
                                                 }
                                                 ExplorerView.CATEGORY -> {
-                                                        val isImagesCategory =
-                                                                currentCategoryName == "Images"
-                                                        val activeCategorySortType =
-                                                                if (isImagesCategory)
-                                                                        imageSortType
-                                                                else sortType
-                                                        val activeCategorySortAscending =
-                                                                if (isImagesCategory)
-                                                                        imageSortAscending
-                                                                else sortAscending
                                                         val sorted =
                                                                 remember(
                                                                         categoryFilesList,
                                                                         searchQuery,
-                                                                        activeCategorySortType,
-                                                                        activeCategorySortAscending
+                                                                        activeSortType,
+                                                                        activeSortAscending
                                                                 ) {
                                                                         sortFileList(
                                                                                 categoryFilesList,
-                                                                                activeCategorySortType,
-                                                                                activeCategorySortAscending
+                                                                                activeSortType,
+                                                                                activeSortAscending
                                                                         )
                                                                 }
                                                         if (currentCategoryName == "Images") {
@@ -2854,20 +3161,11 @@ fun LocalExplorerScreen(
                                                                                         imageSortType,
                                                                                         imageSortAscending
                                                                                 )
-                                                                                sortedAlbums
-                                                                                        .filter {
-                                                                                                pinnedAlbumPaths.contains(
-                                                                                                        it.directory
-                                                                                                                .absolutePath
-                                                                                                )
-                                                                                        } +
-                                                                                        sortedAlbums.filter {
-                                                                                                !pinnedAlbumPaths
-                                                                                                        .contains(
-                                                                                                                it.directory
-                                                                                                                        .absolutePath
-                                                                                                        )
-                                                                                        }
+                                                                                val pinnedPathsList = pinnedAlbumPaths.toList()
+                                                                                val pinned = sortedAlbums.filter { pinnedAlbumPaths.contains(it.directory.absolutePath) }
+                                                                                        .sortedByDescending { pinnedPathsList.indexOf(it.directory.absolutePath) }
+                                                                                val unpinned = sortedAlbums.filter { !pinnedAlbumPaths.contains(it.directory.absolutePath) }
+                                                                                pinned + unpinned
                                                                         }
                                                                 if (useImageAlbums &&
                                                                                 selectedImageAlbum ==
@@ -3662,9 +3960,65 @@ fun LocalExplorerScreen(
                                                                                 )
                                                                         }
                                                                 }
+                                                        } else if (currentCategoryName == "Audio" && useAudioAlbums && selectedAudioAlbum == null) {
+                                                                val audioAlbumsList = remember(categoryFilesList, searchQuery, pinnedAlbumPaths, audioSortTypeState.value, audioSortAscendingState.value) {
+                                                                        val filtered = if (searchQuery.isNotBlank()) {
+                                                                                categoryFilesList.filter { it.name.contains(searchQuery, ignoreCase = true) }
+                                                                        } else { categoryFilesList }
+                                                                        val sortedAlbums = filtered.groupBy { it.parentFile?.absolutePath ?: "" }
+                                                                                .mapNotNull { (path, files) ->
+                                                                                        val dir = java.io.File(path)
+                                                                                        if (dir.exists()) {
+                                                                                                val firstSong = files.firstOrNull { it.isFile } ?: dir
+                                                                                                AudioAlbum(dir.name, dir, firstSong, files.size, dir.lastModified())
+                                                                                        } else null
+                                                                                }.sortedWith(
+                                                                                        if (audioSortTypeState.value == "DATE") {
+                                                                                                if (audioSortAscendingState.value) compareBy<AudioAlbum> { it.lastModified } else compareByDescending { it.lastModified }
+                                                                                        } else {
+                                                                                                if (audioSortAscendingState.value) compareBy<AudioAlbum> { it.name.lowercase() } else compareByDescending { it.name.lowercase() }
+                                                                                        }
+                                                                                )
+                                                                        
+                                                                        val pinnedPathsList = pinnedAlbumPaths.toList()
+                                                                        val pinned = sortedAlbums.filter { pinnedAlbumPaths.contains(it.directory.absolutePath) }
+                                                                                .sortedByDescending { pinnedPathsList.indexOf(it.directory.absolutePath) }
+                                                                        val unpinned = sortedAlbums.filter { !pinnedAlbumPaths.contains(it.directory.absolutePath) }
+                                                                        pinned + unpinned
+                                                                }
+                                                                val audioAlbumsGridState = rememberLazyGridState()
+                                                                AudioAlbumsGrid(
+                                                                        albums = audioAlbumsList,
+                                                                        gridState = audioAlbumsGridState,
+                                                                        isLoading = isLoading,
+                                                                        selectedAlbum = selectedAudioAlbumForActions,
+                                                                        pinnedAlbumPaths = pinnedAlbumPaths,
+                                                                        onAlbumClick = { album ->
+                                                                                if (selectedAudioAlbumForActions != null) {
+                                                                                        if (selectedAudioAlbumForActions?.directory?.absolutePath == album.directory.absolutePath) {
+                                                                                                selectedAudioAlbumForActions = null
+                                                                                        } else {
+                                                                                                selectedAudioAlbumForActions = album
+                                                                                        }
+                                                                                } else {
+                                                                                        selectedAudioAlbum = album
+                                                                                }
+                                                                        },
+                                                                        onAlbumLongClick = { album ->
+                                                                                selectedAudioAlbumForActions = album
+                                                                                selectedFiles.clear()
+                                                                                isMultiSelectMode = false
+                                                                        },
+                                                                        modifier = Modifier.fillMaxSize()
+                                                                )
                                                         } else {
+                                                                val filesToDisplay = if (currentCategoryName == "Audio" && useAudioAlbums && selectedAudioAlbum != null) {
+                                                                        sorted.filter { it.parentFile?.absolutePath == selectedAudioAlbum?.directory?.absolutePath }
+                                                                } else {
+                                                                        sorted
+                                                                }
                                                                 DirectoryViewer(
-                                                                        files = sorted,
+                                                                        files = filesToDisplay,
                                                                         selectedFiles =
                                                                                 selectedFiles,
                                                                         isMultiSelectMode =
@@ -3707,7 +4061,7 @@ fun LocalExplorerScreen(
                                                                                                 context =
                                                                                                         context,
                                                                                                 playbackQueue =
-                                                                                                        sorted,
+                                                                                                        filesToDisplay,
                                                                                                 onPdfPreview = {
                                                                                                         previewPdfFile =
                                                                                                                 it
@@ -3808,6 +4162,7 @@ fun LocalExplorerScreen(
                                         androidx.compose.animation.AnimatedVisibility(
                                                 visible =
                                                         selectedAlbumForActions != null ||
+                                                                selectedAudioAlbumForActions != null ||
                                                                 isMultiSelectMode ||
                                                                 copiedFiles.isNotEmpty(),
                                                 enter =
@@ -4430,6 +4785,177 @@ fun LocalExplorerScreen(
                                                                                                 tint =
                                                                                                         FluentTheme.colors
                                                                                                                 .textMuted
+                                                                                        )
+                                                                                }
+                                                                        }
+                                                                } else if (selectedAudioAlbumForActions != null) {
+                                                                        val actionAlbum = selectedAudioAlbumForActions!!
+                                                                        val filesInAlbum = audioAlbumFiles(actionAlbum)
+                                                                        val albumIsPinned = isAudioAlbumPinned(actionAlbum)
+                                                                        Column(
+                                                                                verticalArrangement = Arrangement.Center,
+                                                                                modifier = Modifier.width(42.dp)
+                                                                        ) {
+                                                                                Text(
+                                                                                        text = filesInAlbum.size.toString(),
+                                                                                        fontWeight = FontWeight.SemiBold,
+                                                                                        color = FluentTheme.colors.textColor,
+                                                                                        fontSize = 13.sp,
+                                                                                        maxLines = 1,
+                                                                                        overflow = TextOverflow.Ellipsis
+                                                                                )
+                                                                                Text(
+                                                                                        text = "selected",
+                                                                                        color = FluentTheme.colors.accent,
+                                                                                        fontSize = 10.sp,
+                                                                                        fontWeight = FontWeight.Bold,
+                                                                                        maxLines = 1,
+                                                                                        overflow = TextOverflow.Clip
+                                                                                )
+                                                                        }
+                                                                        Row(
+                                                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                                                verticalAlignment = Alignment.CenterVertically
+                                                                        ) {
+                                                                                IconButton(
+                                                                                        modifier = Modifier.size(40.dp),
+                                                                                        onClick = {
+                                                                                                if (filesInAlbum.isNotEmpty()) {
+                                                                                                        shareFiles(filesInAlbum)
+                                                                                                }
+                                                                                        }
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default.Share,
+                                                                                                contentDescription = "Share album",
+                                                                                                tint = FluentTheme.colors.textColor
+                                                                                        )
+                                                                                }
+                                                                                IconButton(
+                                                                                        modifier = Modifier.size(40.dp),
+                                                                                        onClick = {
+                                                                                                val filesToSend = filesInAlbum.filter { it.isFile }
+                                                                                                if (filesToSend.isNotEmpty()) {
+                                                                                                        syncViewModel.sendFilesToDesktop(context, filesToSend)
+                                                                                                        selectedAudioAlbumForActions = null
+                                                                                                }
+                                                                                        },
+                                                                                        enabled = isConnectedToDesktop
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default.Computer,
+                                                                                                contentDescription = "Send album to Desktop",
+                                                                                                tint = if (isConnectedToDesktop) FluentTheme.colors.accent else FluentTheme.colors.textMuted.copy(alpha = 0.4f)
+                                                                                        )
+                                                                                }
+                                                                                IconButton(
+                                                                                        modifier = Modifier.size(40.dp),
+                                                                                        onClick = {
+                                                                                                if (filesInAlbum.isNotEmpty()) {
+                                                                                                        deleteFiles(filesInAlbum)
+                                                                                                        selectedAudioAlbumForActions = null
+                                                                                                }
+                                                                                        }
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default.Delete,
+                                                                                                contentDescription = "Delete album audios",
+                                                                                                tint = FluentTheme.colors.dangerText
+                                                                                        )
+                                                                                }
+                                                                                var showAudioAlbumMoreMenu by remember { mutableStateOf(false) }
+                                                                                Box {
+                                                                                        IconButton(
+                                                                                                modifier = Modifier.size(40.dp),
+                                                                                                onClick = { showAudioAlbumMoreMenu = true }
+                                                                                        ) {
+                                                                                                Icon(
+                                                                                                        Icons.Default.MoreVert,
+                                                                                                        contentDescription = "Album options",
+                                                                                                        tint = FluentTheme.colors.textColor
+                                                                                                )
+                                                                                        }
+                                                                                        DropdownMenu(
+                                                                                                expanded = showAudioAlbumMoreMenu,
+                                                                                                onDismissRequest = { showAudioAlbumMoreMenu = false },
+                                                                                                modifier = Modifier.background(FluentTheme.colors.panelBg)
+                                                                                        ) {
+                                                                                                DropdownMenuItem(
+                                                                                                        text = { Text(if (albumIsPinned) "Unpin Album" else "Pin Album", color = FluentTheme.colors.textColor) },
+                                                                                                        leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null, tint = FluentTheme.colors.textColor) },
+                                                                                                        onClick = {
+                                                                                                                showAudioAlbumMoreMenu = false
+                                                                                                                setAudioAlbumPinned(actionAlbum, !albumIsPinned)
+                                                                                                                Toast.makeText(context, if (albumIsPinned) "Album unpinned" else "Album pinned", Toast.LENGTH_SHORT).show()
+                                                                                                                selectedAudioAlbumForActions = null
+                                                                                                        }
+                                                                                                )
+                                                                                                HorizontalDivider()
+                                                                                                DropdownMenuItem(
+                                                                                                        text = { Text("Copy Album Audios", color = FluentTheme.colors.textColor) },
+                                                                                                        leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, tint = FluentTheme.colors.textColor) },
+                                                                                                        onClick = {
+                                                                                                                showAudioAlbumMoreMenu = false
+                                                                                                                copyOrMoveFiles(filesInAlbum, false)
+                                                                                                                selectedAudioAlbumForActions = null
+                                                                                                        }
+                                                                                                )
+                                                                                                DropdownMenuItem(
+                                                                                                        text = { Text("Move Album Audios To", color = FluentTheme.colors.textColor) },
+                                                                                                        leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null, tint = FluentTheme.colors.textColor) },
+                                                                                                        onClick = {
+                                                                                                                showAudioAlbumMoreMenu = false
+                                                                                                                copyOrMoveFiles(filesInAlbum, true)
+                                                                                                                selectedAudioAlbumForActions = null
+                                                                                                        }
+                                                                                                )
+                                                                                                val anyNotFavorited = filesInAlbum.any { !isFavorited(it) }
+                                                                                                DropdownMenuItem(
+                                                                                                        text = { Text(if (anyNotFavorited) "Favorite Album Audios" else "Unfavorite Album Audios", color = FluentTheme.colors.textColor) },
+                                                                                                        leadingIcon = { Icon(if (anyNotFavorited) Icons.Outlined.StarBorder else Icons.Filled.Star, contentDescription = null, tint = if (anyNotFavorited) FluentTheme.colors.textColor else Color(0xFFFFC107)) },
+                                                                                                        onClick = {
+                                                                                                                showAudioAlbumMoreMenu = false
+                                                                                                                updateFavoritesBatch(filesInAlbum, anyNotFavorited)
+                                                                                                                selectedAudioAlbumForActions = null
+                                                                                                        }
+                                                                                                )
+                                                                                                DropdownMenuItem(
+                                                                                                        text = { Text("Compress Album", color = FluentTheme.colors.textColor) },
+                                                                                                        leadingIcon = { Icon(Icons.Default.Archive, contentDescription = null, tint = FluentTheme.colors.textColor) },
+                                                                                                        onClick = {
+                                                                                                                showAudioAlbumMoreMenu = false
+                                                                                                                showCompressDialog = filesInAlbum
+                                                                                                                selectedAudioAlbumForActions = null
+                                                                                                        }
+                                                                                                )
+                                                                                                DropdownMenuItem(
+                                                                                                        text = { Text("Rename Album", color = FluentTheme.colors.textColor) },
+                                                                                                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = FluentTheme.colors.textColor) },
+                                                                                                        onClick = {
+                                                                                                                showAudioAlbumMoreMenu = false
+                                                                                                                showAudioAlbumRenameDialog = actionAlbum
+                                                                                                        }
+                                                                                                )
+                                                                                                DropdownMenuItem(
+                                                                                                        text = { Text("Details", color = FluentTheme.colors.textColor) },
+                                                                                                        leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = FluentTheme.colors.textColor) },
+                                                                                                        onClick = {
+                                                                                                                showAudioAlbumMoreMenu = false
+                                                                                                                showAudioAlbumDetailsDialog = actionAlbum
+                                                                                                        }
+                                                                                                )
+                                                                                        }
+                                                                                }
+                                                                                IconButton(
+                                                                                        modifier = Modifier.size(40.dp),
+                                                                                        onClick = {
+                                                                                                selectedAudioAlbumForActions = null
+                                                                                        }
+                                                                                ) {
+                                                                                        Icon(
+                                                                                                Icons.Default.Close,
+                                                                                                contentDescription = "Cancel album selection",
+                                                                                                tint = FluentTheme.colors.textMuted
                                                                                         )
                                                                                 }
                                                                         }
@@ -5386,6 +5912,60 @@ fun LocalExplorerScreen(
                         )
                 }
 
+                showAudioAlbumRenameDialog?.let { album ->
+                        var renameText by remember(album.directory.absolutePath) {
+                                mutableStateOf(album.name)
+                        }
+                        AlertDialog(
+                                onDismissRequest = { showAudioAlbumRenameDialog = null },
+                                title = { Text("Rename Album") },
+                                text = {
+                                        OutlinedTextField(
+                                                value = renameText,
+                                                onValueChange = { renameText = it },
+                                                label = { Text("Album Name") },
+                                                singleLine = true,
+                                                colors =
+                                                        OutlinedTextFieldDefaults.colors(
+                                                                focusedBorderColor =
+                                                                        FluentTheme.colors.accent,
+                                                                focusedLabelColor =
+                                                                        FluentTheme.colors.accent
+                                                        )
+                                        )
+                                },
+                                confirmButton = {
+                                        Button(
+                                                onClick = {
+                                                        renameAudioAlbum(album, renameText)
+                                                        showAudioAlbumRenameDialog = null
+                                                },
+                                                colors =
+                                                        ButtonDefaults.buttonColors(
+                                                                containerColor =
+                                                                        FluentTheme.colors.accent
+                                                        )
+                                        ) { Text("Rename", color = FluentTheme.colors.onAccent) }
+                                },
+                                dismissButton = {
+                                        TextButton(
+                                                onClick = { showAudioAlbumRenameDialog = null }
+                                        ) {
+                                                Text("Cancel", color = FluentTheme.colors.textColor)
+                                        }
+                                },
+                                containerColor = FluentTheme.colors.pageBg
+                        )
+                }
+
+                showAudioAlbumDetailsDialog?.let { album ->
+                        LocalAudioAlbumDetailsDialog(
+                                album = album,
+                                files = audioAlbumFiles(album),
+                                onDismiss = { showAudioAlbumDetailsDialog = null }
+                        )
+                }
+
                 albumPinRequest?.let { request ->
                         val title =
                                 when (request.mode) {
@@ -5735,15 +6315,26 @@ fun ExplorerHeader(
         isDocumentsCategory: Boolean = false,
         useImageAlbums: Boolean = true,
         onToggleImageAlbums: () -> Unit = {},
+        isAudioCategory: Boolean = false,
+        useAudioAlbums: Boolean = false,
+        onToggleAudioAlbums: () -> Unit = {},
         isConnectedToDesktop: Boolean = false,
         onSendToDesktop: () -> Unit = {},
-        hasSelectedFiles: Boolean = false
+        hasSelectedFiles: Boolean = false,
+        forceSearchActive: Boolean = false
 ) {
         val canSearch =
                 currentView == ExplorerView.DIRECTORY ||
                         currentView == ExplorerView.CATEGORY ||
                         currentView == ExplorerView.FAVORITES
-        var isSearchActive by remember { mutableStateOf(false) }
+        var isSearchActive by remember { mutableStateOf(forceSearchActive) }
+
+        LaunchedEffect(forceSearchActive) {
+                if (forceSearchActive) {
+                        isSearchActive = true
+                }
+        }
+
         val showSearch = canSearch && (isSearchActive || searchQuery.isNotEmpty())
         val searchFocusRequester = remember { FocusRequester() }
         val keyboardController = LocalSoftwareKeyboardController.current
@@ -6222,6 +6813,65 @@ fun ExplorerHeader(
                                                                 },
                                                                 onClick = {
                                                                         onToggleImageAlbums()
+                                                                        showMenu = false
+                                                                }
+                                                        )
+                                                        Divider(
+                                                                color =
+                                                                        FluentTheme.colors
+                                                                                .panelBorder
+                                                        )
+                                                }
+
+                                                if (isAudioCategory) {
+                                                        DropdownMenuItem(
+                                                                text = {
+                                                                        Row(
+                                                                                verticalAlignment =
+                                                                                        Alignment
+                                                                                                .CenterVertically
+                                                                        ) {
+                                                                                Icon(
+                                                                                        imageVector =
+                                                                                                if (useAudioAlbums
+                                                                                                )
+                                                                                                        Icons.Default
+                                                                                                                .Audiotrack
+                                                                                                else
+                                                                                                        Icons.Default
+                                                                                                                .LibraryMusic,
+                                                                                        contentDescription =
+                                                                                                null,
+                                                                                        tint =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .accent,
+                                                                                        modifier =
+                                                                                                Modifier.size(
+                                                                                                        18.dp
+                                                                                                )
+                                                                                )
+                                                                                Spacer(
+                                                                                        modifier =
+                                                                                                Modifier.width(
+                                                                                                        8.dp
+                                                                                                )
+                                                                                )
+                                                                                Text(
+                                                                                        if (useAudioAlbums
+                                                                                        )
+                                                                                                "Songs"
+                                                                                        else
+                                                                                                "Albums",
+                                                                                        color =
+                                                                                                FluentTheme
+                                                                                                        .colors
+                                                                                                        .textColor
+                                                                                )
+                                                                        }
+                                                                },
+                                                                onClick = {
+                                                                        onToggleAudioAlbums()
                                                                         showMenu = false
                                                                 }
                                                         )
@@ -6875,8 +7525,8 @@ fun StorageAnalysisScreen(
                         items.add(StorageCategoryStats("Videos", videosSize, Color(0xFFB57EDC), listOf("mp4", "mkv", "webm", "avi", "3gp", "mov")) {
                                 onNavigateToCategory("Videos", listOf("mp4", "mkv", "webm", "avi", "3gp", "mov"))
                         })
-                        items.add(StorageCategoryStats("Audio files", audioSize, Color(0xFF75A6FF), listOf("mp3", "wav", "m4a", "flac", "ogg", "aac")) {
-                                onNavigateToCategory("Audio files", listOf("mp3", "wav", "m4a", "flac", "ogg", "aac"))
+                        items.add(StorageCategoryStats("Audio", audioSize, Color(0xFF75A6FF), listOf("mp3", "wav", "m4a", "flac", "ogg", "aac")) {
+                                onNavigateToCategory("Audio", listOf("mp3", "wav", "m4a", "flac", "ogg", "aac"))
                         })
                         items.add(StorageCategoryStats("Documents", docsSize, Color(0xFFE5B575), docExts) {
                                 onNavigateToCategory("Documents", docExts)
@@ -7341,7 +7991,7 @@ fun HomeDashboard(
                                         listOf("mp4", "mkv", "webm", "avi", "3gp", "mov")
                                 ),
                                 CategoryItem(
-                                        "Audio files",
+                                        "Audio",
                                         Icons.Default.MusicNote,
                                         listOf(Color(0xFF29B6F6), Color(0xFF0288D1)),
                                         listOf("mp3", "wav", "m4a", "flac", "ogg", "aac")
@@ -7808,6 +8458,187 @@ private fun ImageAlbumsGrid(
         }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun AudioAlbumsGrid(
+        albums: List<AudioAlbum>,
+        gridState: LazyGridState,
+        isLoading: Boolean,
+        selectedAlbum: AudioAlbum?,
+        pinnedAlbumPaths: Set<String>,
+        onAlbumClick: (AudioAlbum) -> Unit,
+        onAlbumLongClick: (AudioAlbum) -> Unit,
+        modifier: Modifier = Modifier
+) {
+        if (albums.isEmpty()) {
+                if (isLoading) {
+                        PlaceholderAlbumsGrid(modifier = modifier)
+                } else {
+                        Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Icon(
+                                                imageVector = Icons.Default.LibraryMusic,
+                                                contentDescription = null,
+                                                tint = FluentTheme.colors.textMuted,
+                                                modifier = Modifier.size(64.dp)
+                                        )
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        Text(
+                                                "No audio albums found",
+                                                color = FluentTheme.colors.textColor,
+                                                fontWeight = FontWeight.SemiBold
+                                        )
+                                }
+                        }
+                }
+                return
+        }
+
+        Box(modifier = modifier.fillMaxSize()) {
+                LazyVerticalGrid(
+                        state = gridState,
+                        columns = GridCells.Adaptive(150.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(24.dp),
+                        modifier = Modifier.fillMaxSize()
+                ) {
+                        items(albums, key = { it.directory.absolutePath }) { album ->
+                                val isSelected =
+                                        selectedAlbum?.directory?.absolutePath ==
+                                                album.directory.absolutePath
+                                val isPinned = pinnedAlbumPaths.contains(album.directory.absolutePath)
+                                Column(
+                                        modifier =
+                                                Modifier.fillMaxWidth()
+                                                        .combinedClickable(
+                                                                onClick = { onAlbumClick(album) },
+                                                                onLongClick = { onAlbumLongClick(album) }
+                                                        )
+                                ) {
+                                         Box(
+                                                 modifier =
+                                                         Modifier.fillMaxWidth()
+                                                                 .aspectRatio(1f)
+                                                                 .clip(RoundedCornerShape(28.dp))
+                                                                  .background(FluentTheme.colors.surfaceBg)
+                                                                 .border(
+                                                                         if (isSelected) 3.dp else 1.dp,
+                                                                         if (isSelected)
+                                                                                 FluentTheme.colors.accent
+                                                                         else
+                                                                                 FluentTheme.colors
+                                                                                         .panelBorder,
+                                                                         RoundedCornerShape(28.dp)
+                                                                 )
+                                         ) {
+                                                 if (album.firstSongFile != null) {
+                                                         AudioArtworkOrIcon(
+                                                                 file = album.firstSongFile,
+                                                                 modifier = Modifier.fillMaxSize(),
+                                                                 iconSize = 48.dp,
+                                                                 iconTint = FluentTheme.colors.textMuted
+                                                         )
+                                                 } else {
+                                                         Box(
+                                                                 modifier =
+                                                                         Modifier.fillMaxSize()
+                                                                                 .background(
+                                                                                         FluentTheme
+                                                                                                 .colors
+                                                                                                 .panelBg
+                                                                                 ),
+                                                                 contentAlignment =
+                                                                         Alignment.Center
+                                                         ) {
+                                                                 Icon(
+                                                                         Icons.Default
+                                                                                 .MusicNote,
+                                                                         contentDescription =
+                                                                                 null,
+                                                                         tint =
+                                                                                 FluentTheme
+                                                                                         .colors
+                                                                                         .textMuted
+                                                                 )
+                                                         }
+                                                 }
+                                                 if (isPinned) {
+                                                         Box(
+                                                                 modifier =
+                                                                         Modifier.align(
+                                                                                         Alignment.TopStart
+                                                                                 )
+                                                                                 .padding(10.dp)
+                                                                                 .size(28.dp)
+                                                                                 .clip(CircleShape)
+                                                                                 .background(
+                                                                                         FluentTheme
+                                                                                                 .colors
+                                                                                                 .accent
+                                                                                                 .copy(alpha = 0.95f)
+                                                                                 ),
+                                                                 contentAlignment = Alignment.Center
+                                                         ) {
+                                                                 Icon(
+                                                                         Icons.Default.PushPin,
+                                                                         contentDescription = null,
+                                                                         tint = FluentTheme.colors.onAccent,
+                                                                         modifier = Modifier.size(16.dp)
+                                                                 )
+                                                         }
+                                                 }
+                                                 if (isSelected) {
+                                                         Box(
+                                                                 modifier =
+                                                                         Modifier.align(
+                                                                                         Alignment.TopEnd
+                                                                                 )
+                                                                                 .padding(10.dp)
+                                                                                 .size(28.dp)
+                                                                                 .clip(CircleShape)
+                                                                                 .background(
+                                                                                         FluentTheme
+                                                                                                 .colors
+                                                                                                 .accent
+                                                                                 ),
+                                                                 contentAlignment = Alignment.Center
+                                                         ) {
+                                                                 Icon(
+                                                                         Icons.Default.Check,
+                                                                         contentDescription = null,
+                                                                         tint = FluentTheme.colors.onAccent,
+                                                                         modifier = Modifier.size(18.dp)
+                                                                 )
+                                                         }
+                                                 }
+                                         }
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        Text(
+                                                text = album.name,
+                                                color = FluentTheme.colors.textColor,
+                                                fontSize = 18.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        Text(
+                                                text = album.count.toString() + " tracks",
+                                                color = FluentTheme.colors.textMuted,
+                                                fontSize = 14.sp,
+                                                maxLines = 1
+                                        )
+                                }
+                        }
+                }
+                FastScrollbarGrid(
+                        gridState = gridState,
+                        modifier = Modifier.align(Alignment.CenterEnd)
+                )
+        }
+}
+
 @Composable
 private fun AlbumPinDialog(
         title: String,
@@ -8039,6 +8870,41 @@ private fun LocalAlbumDetailsDialog(
                                 DetailRow("Photos", files.size.toString())
                                 DetailRow("Size", formatSize(totalBytes))
                                 DetailRow("Locked", if (locked) "Yes" else "No")
+                                DetailRow(
+                                        "Modified",
+                                        SimpleDateFormat(
+                                                        "MMM dd, yyyy HH:mm",
+                                                        Locale.getDefault()
+                                                )
+                                                .format(Date(album.lastModified))
+                                )
+                        }
+                },
+                confirmButton = {
+                        TextButton(onClick = onDismiss) {
+                                Text("Close", color = FluentTheme.colors.accent)
+                        }
+                },
+                containerColor = FluentTheme.colors.pageBg
+        )
+}
+
+@Composable
+private fun LocalAudioAlbumDetailsDialog(
+        album: AudioAlbum,
+        files: List<File>,
+        onDismiss: () -> Unit
+) {
+        val totalBytes = remember(files) { files.sumOf { it.length() } }
+        AlertDialog(
+                onDismissRequest = onDismiss,
+                title = { Text("Audio Album Details", color = FluentTheme.colors.textColor) },
+                text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                DetailRow("Name", album.name)
+                                DetailRow("Path", album.directory.absolutePath)
+                                DetailRow("Audios", files.size.toString())
+                                DetailRow("Size", formatSize(totalBytes))
                                 DetailRow(
                                         "Modified",
                                         SimpleDateFormat(
@@ -9490,6 +10356,7 @@ fun TrashViewer(
                                                                                 Alignment
                                                                                         .CenterVertically
                                                                 ) {
+
                                                                         TextButton(
                                                                                 onClick = {
                                                                                         onDeletePermanently(
@@ -12496,6 +13363,66 @@ fun LocalTextViewerDialog(
 fun LocalMusicPlayerDialog(file: File, onDismiss: () -> Unit) {
         val duration = LocalMusicPlayerManager.duration
         val position = LocalMusicPlayerManager.currentPlaybackPosition
+        val context = LocalContext.current
+        // AudioManager for system volume control
+        val audioManager = remember { context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager }
+        val maxSystemVolume = remember { audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC) }
+
+        var isSwipingVolume by remember { mutableStateOf(false) }
+        var volumeBeforeMute by remember { mutableFloatStateOf(-1f) } // -1 means no saved level
+        
+        // Initialize swipeVolumePercent from the current system volume
+        var swipeVolumePercent by remember { 
+                val currentSysVol = audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                mutableFloatStateOf(currentSysVol.toFloat() / maxSystemVolume.toFloat())
+        }
+
+        // Observe system volume changes (e.g. from hardware keys) to keep slider in sync
+        DisposableEffect(Unit) {
+                val contentObserver = object : android.database.ContentObserver(android.os.Handler(android.os.Looper.getMainLooper())) {
+                        override fun onChange(selfChange: Boolean) {
+                                val currentSysVol = audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                                swipeVolumePercent = currentSysVol.toFloat() / maxSystemVolume.toFloat()
+                        }
+                }
+                context.contentResolver.registerContentObserver(
+                        android.provider.Settings.System.CONTENT_URI, true, contentObserver
+                )
+                onDispose {
+                        context.contentResolver.unregisterContentObserver(contentObserver)
+                }
+        }
+
+        // Volume Indicator Overlay state
+        LaunchedEffect(isSwipingVolume) {
+                if (!isSwipingVolume) {
+                        delay(1000)
+                }
+        }
+
+        fun updateVolume(deltaPercent: Float) {
+                swipeVolumePercent = (swipeVolumePercent + deltaPercent).coerceIn(0.0f, 1.0f)
+                
+                // Map to system volume
+                val newSystemVolume = (swipeVolumePercent * maxSystemVolume).toInt().coerceIn(0, maxSystemVolume)
+                audioManager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, newSystemVolume, 0)
+        }
+
+        fun toggleMute() {
+                if (swipeVolumePercent > 0.01f) {
+                        // Currently has sound -> mute it, save current level
+                        volumeBeforeMute = swipeVolumePercent
+                        swipeVolumePercent = 0f
+                        audioManager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, 0, 0)
+                } else {
+                        // Currently muted -> restore previous level (or 50% if none saved)
+                        val restoreTo = if (volumeBeforeMute > 0.01f) volumeBeforeMute else 0.5f
+                        swipeVolumePercent = restoreTo
+                        val newVol = (restoreTo * maxSystemVolume).toInt().coerceIn(1, maxSystemVolume)
+                        audioManager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, newVol, 0)
+                        volumeBeforeMute = -1f
+                }
+        }
 
         Dialog(onDismissRequest = onDismiss) {
                 Surface(
@@ -12504,32 +13431,53 @@ fun LocalMusicPlayerDialog(file: File, onDismiss: () -> Unit) {
                         color = FluentTheme.colors.pageBg,
                         border = BorderStroke(1.dp, FluentTheme.colors.panelBorder)
                 ) {
-                        Column(
-                                modifier = Modifier.fillMaxWidth().padding(20.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                                // Header
-                                Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                        Text(
-                                                "Now Playing",
-                                                fontWeight = FontWeight.Bold,
-                                                color = FluentTheme.colors.textMuted,
-                                                fontSize = 13.sp
-                                        )
-                                        IconButton(onClick = onDismiss) {
-                                                Icon(
-                                                        Icons.Default.Close,
-                                                        contentDescription = "Close",
-                                                        tint = FluentTheme.colors.textColor
+                        Box(
+                                modifier = Modifier
+                                        .fillMaxWidth()
+                                        .pointerInput(Unit) {
+                                                detectVerticalDragGestures(
+                                                        onDragStart = { offset: androidx.compose.ui.geometry.Offset ->
+                                                                if (offset.x > size.width / 2f) {
+                                                                        isSwipingVolume = true
+                                                                }
+                                                        },
+                                                        onDragEnd = { isSwipingVolume = false },
+                                                        onDragCancel = { isSwipingVolume = false },
+                                                        onVerticalDrag = { change: androidx.compose.ui.input.pointer.PointerInputChange, dragAmount: Float ->
+                                                                if (isSwipingVolume) {
+                                                                        val delta = -dragAmount / size.height.toFloat() * 1.5f
+                                                                        updateVolume(delta)
+                                                                }
+                                                        }
                                                 )
                                         }
-                                }
+                        ) {
+                                Column(
+                                        modifier = Modifier.fillMaxWidth().padding(20.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                        // Header
+                                        Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                                Text(
+                                                        "Now Playing",
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = FluentTheme.colors.textMuted,
+                                                        fontSize = 13.sp
+                                                )
+                                                IconButton(onClick = onDismiss) {
+                                                        Icon(
+                                                                Icons.Default.Close,
+                                                                contentDescription = "Close",
+                                                                tint = FluentTheme.colors.textColor
+                                                        )
+                                                }
+                                        }
 
-                                Spacer(modifier = Modifier.height(20.dp))
+                                        Spacer(modifier = Modifier.height(20.dp))
 
                                 AudioArtworkOrIcon(
                                         file = file,
@@ -12713,6 +13661,58 @@ fun LocalMusicPlayerDialog(file: File, onDismiss: () -> Unit) {
                                         Spacer(modifier = Modifier.width(8.dp))
                                         // Placeholder for visual balance
                                         Spacer(modifier = Modifier.size(40.dp))
+                                }
+                                }
+                                
+                                // Always-visible volume icon on the right side
+                                Column(
+                                        modifier = Modifier
+                                                .align(Alignment.CenterEnd)
+                                                .padding(end = 8.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                        // Animated slider bar - only appears during swipe
+                                        androidx.compose.animation.AnimatedVisibility(
+                                                visible = isSwipingVolume,
+                                                enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandVertically(),
+                                                exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkVertically()
+                                        ) {
+                                                Box(
+                                                        modifier = Modifier
+                                                                .width(24.dp)
+                                                                .height(140.dp)
+                                                                .clip(RoundedCornerShape(12.dp))
+                                                                .background(Color.Black.copy(alpha = 0.5f)),
+                                                        contentAlignment = Alignment.BottomCenter
+                                                ) {
+                                                        val fillFraction = swipeVolumePercent.coerceIn(0f, 1f)
+                                                        
+                                                        Box(
+                                                                modifier = Modifier
+                                                                        .fillMaxWidth()
+                                                                        .fillMaxHeight(fillFraction)
+                                                                        .clip(RoundedCornerShape(12.dp))
+                                                                        .background(FluentTheme.colors.accent)
+                                                        )
+                                                }
+                                        }
+                                        
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        
+                                        // Always-visible volume icon — tap to mute/unmute
+                                        Icon(
+                                                imageVector = if (swipeVolumePercent <= 0.01f) Icons.Default.VolumeOff
+                                                        else if (swipeVolumePercent < 0.5f) Icons.Default.VolumeDown
+                                                        else Icons.Default.VolumeUp,
+                                                contentDescription = "Toggle Mute",
+                                                tint = FluentTheme.colors.textMuted,
+                                                modifier = Modifier
+                                                        .size(20.dp)
+                                                        .clickable(
+                                                                indication = null,
+                                                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                                                        ) { toggleMute() }
+                                        )
                                 }
                         }
                 }
@@ -14944,6 +15944,41 @@ private fun sortImageAlbums(
         val comparator =
                 when (sortType) {
                         FileSortType.NAME -> compareBy<ImageAlbum> { it.name.lowercase() }
+                        FileSortType.DATE -> compareBy { it.lastModified }
+                        FileSortType.SIZE -> compareBy { it.count }
+                        FileSortType.TYPE -> compareBy { it.directory.absolutePath.lowercase() }
+                }
+        val sorted = albums.sortedWith(comparator)
+        return if (ascending) sorted else sorted.reversed()
+}
+
+private fun buildAudioAlbums(files: List<File>, showHiddenFiles: Boolean): List<AudioAlbum> =
+        files.filter { file ->
+                        file.isFile && (showHiddenFiles || !file.name.startsWith("."))
+                }
+                .groupBy { it.parentFile?.absoluteFile ?: File("") }
+                .filterKeys { it.path.isNotEmpty() }
+                .mapNotNull { (directory, albumFiles) ->
+                        val firstSong =
+                                albumFiles.sortedBy { it.name.lowercase() }.firstOrNull()
+                                        ?: return@mapNotNull null
+                        AudioAlbum(
+                                name = directory.name.ifBlank { directory.absolutePath },
+                                directory = directory,
+                                firstSongFile = firstSong,
+                                count = albumFiles.size,
+                                lastModified = firstSong.lastModified()
+                        )
+                }
+
+private fun sortAudioAlbums(
+        albums: List<AudioAlbum>,
+        sortType: FileSortType,
+        ascending: Boolean
+): List<AudioAlbum> {
+        val comparator =
+                when (sortType) {
+                        FileSortType.NAME -> compareBy<AudioAlbum> { it.name.lowercase() }
                         FileSortType.DATE -> compareBy { it.lastModified }
                         FileSortType.SIZE -> compareBy { it.count }
                         FileSortType.TYPE -> compareBy { it.directory.absolutePath.lowercase() }

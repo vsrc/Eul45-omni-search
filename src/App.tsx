@@ -1491,6 +1491,15 @@ function PhoneIcon() {
   );
 }
 
+function FolderOpenIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4.5 19.25h15a1.75 1.75 0 0 0 1.69-1.3l1.56-6a1.25 1.25 0 0 0-1.21-1.57H5.24" />
+      <path d="M2.75 7.5V17a1.5 1.5 0 0 0 .1.5L4.9 11a1.75 1.75 0 0 1 1.69-1.3H19V8.25A1.75 1.75 0 0 0 17.25 6.5h-5.5L9.5 4.75H4.5A1.75 1.75 0 0 0 2.75 6.5z" />
+    </svg>
+  );
+}
+
 function StepChevronIcon({ direction }: { direction: "up" | "down" }) {
   return (
     <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -2660,6 +2669,33 @@ function App() {
   const [searchResultDeleteToRecycleBin, setSearchResultDeleteToRecycleBin] = useState(false);
   const [resultView, setResultView] = useState<ResultViewTab>("all");
   const [resultSort, setResultSort] = useState<ResultSortMode>("relevance");
+  const [selectedPathsForBulk, setSelectedPathsForBulk] = useState<Set<string>>(() => new Set());
+  const [isSelectionModeActive, setIsSelectionModeActive] = useState(false);
+
+  // Bulk rename states
+  const [bulkRenameOpen, setBulkRenameOpen] = useState(false);
+  const [bulkRenameMode, setBulkRenameMode] = useState<"replace" | "prefix_suffix" | "enumerate">("replace");
+  const [bulkRenameReplaceSearch, setBulkRenameReplaceSearch] = useState("");
+  const [bulkRenameReplaceWith, setBulkRenameReplaceWith] = useState("");
+  const [bulkRenamePrefix, setBulkRenamePrefix] = useState("");
+  const [bulkRenameSuffix, setBulkRenameSuffix] = useState("");
+  const [bulkRenameEnumerateBase, setBulkRenameEnumerateBase] = useState("");
+  const [bulkRenameEnumerateDigits, setBulkRenameEnumerateDigits] = useState(3);
+  const [bulkRenameEnumerateStart, setBulkRenameEnumerateStart] = useState(1);
+  const [bulkRenameBusy, setBulkRenameBusy] = useState(false);
+
+  // Bulk delete states
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteRecycleBin, setBulkDeleteRecycleBin] = useState(true);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+
+  // Bulk action progress state
+  const [bulkActionProgress, setBulkActionProgress] = useState<{
+    current: number;
+    total: number;
+    label: string;
+  } | null>(null);
+
   const [windowMode, setWindowMode] = useState<WindowMode>("full");
   const [viewportSize, setViewportSize] = useState(() => readViewportSize());
   const [quickResultsPaneRatio, setQuickResultsPaneRatio] = useState<number>(() => {
@@ -2775,6 +2811,8 @@ function App() {
   const searchResultContextMenuRef = useRef<HTMLDivElement | null>(null);
   const searchResultRenameInputRef = useRef<HTMLInputElement | null>(null);
   const previousSearchQueryRef = useRef("");
+  const longPressTimeoutRef = useRef<number | null>(null);
+  const longPressTriggeredRef = useRef(false);
   const activeThemePreset = themePresetById(themePreset);
   const isQuickMode = windowMode === "quick";
   const isCompactSearchViewport = isQuickMode
@@ -3519,6 +3557,349 @@ function App() {
   useEffect(() => {
     setSearchLimit(defaultSearchLimit);
   }, [trimmedQuery, extension, minSizeMb, maxSizeMb, createdAfter, createdBefore, hasFilters, defaultSearchLimit]);
+
+  // Multi-selection helper functions
+  function toggleBulkSelection(result: SearchResult): void {
+    if (result.resultKind === "app" || isAppSearchResult(result)) {
+      return; // Installed apps cannot be bulk selected
+    }
+    setSelectedPathsForBulk((prev) => {
+      const next = new Set(prev);
+      if (next.has(result.path)) {
+        next.delete(result.path);
+      } else {
+        next.add(result.path);
+      }
+      return next;
+    });
+  }
+
+  function handleRangeSelection(clickedResult: SearchResult): void {
+    if (clickedResult.resultKind === "app" || isAppSearchResult(clickedResult)) {
+      return; // Installed apps cannot be bulk selected
+    }
+    if (visibleResults.length === 0) return;
+
+    const activePath = selectedResult?.path;
+    if (!activePath) {
+      toggleBulkSelection(clickedResult);
+      return;
+    }
+
+    const clickedIndex = visibleResults.findIndex((r) => r.path === clickedResult.path);
+    const activeIndex = visibleResults.findIndex((r) => r.path === activePath);
+
+    if (clickedIndex === -1 || activeIndex === -1) {
+      toggleBulkSelection(clickedResult);
+      return;
+    }
+
+    const start = Math.min(activeIndex, clickedIndex);
+    const end = Math.max(activeIndex, clickedIndex);
+
+    // Filter out folders and apps if we shouldn't bulk select them (folders are fine, apps are not)
+    const pathsToSelect = visibleResults
+      .slice(start, end + 1)
+      .filter((r) => r.resultKind !== "app" && !isAppSearchResult(r))
+      .map((r) => r.path);
+
+    setSelectedPathsForBulk((prev) => {
+      const next = new Set(prev);
+      const isChecking = !prev.has(clickedResult.path);
+      for (const p of pathsToSelect) {
+        if (isChecking) {
+          next.add(p);
+        } else {
+          next.delete(p);
+        }
+      }
+      return next;
+    });
+  }
+
+  function startLongPress(result: SearchResult): void {
+    if (result.resultKind === "app" || isAppSearchResult(result)) {
+      return;
+    }
+    longPressTriggeredRef.current = false;
+    if (longPressTimeoutRef.current !== null) {
+      window.clearTimeout(longPressTimeoutRef.current);
+    }
+    longPressTimeoutRef.current = window.setTimeout(() => {
+      setIsSelectionModeActive(true);
+      setSelectedPathsForBulk((prev) => {
+        const next = new Set(prev);
+        next.add(result.path);
+        return next;
+      });
+      longPressTriggeredRef.current = true;
+      longPressTimeoutRef.current = null;
+    }, 500);
+  }
+
+  function cancelLongPress(): void {
+    if (longPressTimeoutRef.current !== null) {
+      window.clearTimeout(longPressTimeoutRef.current);
+      longPressTimeoutRef.current = null;
+    }
+  }
+
+  useEffect(() => {
+    if (isSelectionModeActive && selectedPathsForBulk.size === 0) {
+      setIsSelectionModeActive(false);
+    }
+  }, [selectedPathsForBulk, isSelectionModeActive]);
+
+  useEffect(() => {
+    if (!isSelectionModeActive) {
+      return;
+    }
+
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+      if (event.key === "Escape") {
+        setIsSelectionModeActive(false);
+        setSelectedPathsForBulk(new Set<string>());
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeyDown);
+    };
+  }, [isSelectionModeActive]);
+
+  // Bulk operations helper functions
+  async function handleBulkCopyPaths(): Promise<void> {
+    if (selectedPathsForBulk.size === 0) return;
+    const pathsArray = Array.from(selectedPathsForBulk);
+    const joinedPaths = pathsArray.join("\n");
+    try {
+      await copyTextToClipboard(joinedPaths);
+      showActionNotice(`Copied ${pathsArray.length} paths to clipboard.`);
+      setActionError(null);
+    } catch (error) {
+      setActionError(`Failed to copy paths: ${String(error)}`);
+    }
+  }
+
+  async function handleBulkSendToPhone(): Promise<void> {
+    if (selectedPathsForBulk.size === 0) return;
+
+    const validResults = visibleResults.filter(
+      (r) => selectedPathsForBulk.has(r.path) && !r.isDirectory && r.resultKind !== "app" && !isAppSearchResult(r)
+    );
+
+    if (validResults.length === 0) {
+      setActionError("No valid files selected to send to phone.");
+      return;
+    }
+
+    setIsSelectionModeActive(false);
+    setSelectedPathsForBulk(new Set<string>());
+    setActiveTab("sync");
+    setActionError(null);
+
+    setBulkActionProgress({
+      current: 0,
+      total: validResults.length,
+      label: "Sending files to phone..."
+    });
+
+    let successCount = 0;
+    let failCount = 0;
+    const errorMessages: string[] = [];
+
+    for (let i = 0; i < validResults.length; i++) {
+      const result = validResults[i];
+      setBulkActionProgress({
+        current: i,
+        total: validResults.length,
+        label: `Sending "${result.name}" to phone...`
+      });
+
+      try {
+        await invoke("send_file_to_mobile", { path: result.path });
+        successCount++;
+      } catch (error) {
+        failCount++;
+        errorMessages.push(`Failed to send "${result.name}": ${String(error)}`);
+      }
+    }
+
+    setBulkActionProgress(null);
+
+    try {
+      const info = await invoke<SyncServerInfo>("get_mobile_sync_server_info");
+      setSyncServerInfo(info);
+    } catch (error) {
+      console.error("Failed to update sync server info:", error);
+    }
+
+    if (successCount > 0) {
+      showActionNotice(`Queued ${successCount} files for phone.`);
+    }
+    if (failCount > 0) {
+      setActionError(errorMessages[0] || "Failed to send some files to phone.");
+    }
+  }
+
+  async function confirmBulkDelete(): Promise<void> {
+    if (selectedPathsForBulk.size === 0 || bulkDeleteBusy) return;
+
+    setBulkDeleteBusy(true);
+    const pathsArray = Array.from(selectedPathsForBulk);
+
+    setBulkActionProgress({
+      current: 0,
+      total: pathsArray.length,
+      label: "Deleting files..."
+    });
+
+    let deletedCount = 0;
+    let failCount = 0;
+    const errorMessages: string[] = [];
+
+    for (let i = 0; i < pathsArray.length; i++) {
+      const path = pathsArray[i];
+      setBulkActionProgress({
+        current: i,
+        total: pathsArray.length,
+        label: `Deleting "${path.split(/[\/\\]/).pop()}"...`
+      });
+
+      try {
+        const deleted = await invoke<boolean>("delete_path", {
+          path,
+          recycleBin: bulkDeleteRecycleBin,
+          recycle_bin: bulkDeleteRecycleBin
+        });
+        if (deleted) {
+          removeSearchResultFromState(path);
+          deletedCount++;
+        } else {
+          failCount++;
+          errorMessages.push(`Could not delete "${path}"`);
+        }
+      } catch (error) {
+        failCount++;
+        errorMessages.push(`Failed to delete "${path}": ${String(error)}`);
+      }
+    }
+
+    setBulkActionProgress(null);
+    setBulkDeleteOpen(false);
+    setBulkDeleteBusy(false);
+
+    setIsSelectionModeActive(false);
+    setSelectedPathsForBulk(new Set<string>());
+
+    if (deletedCount > 0) {
+      showActionNotice(`Deleted ${deletedCount} items.`);
+    }
+    if (failCount > 0) {
+      setActionError(errorMessages[0] || "Failed to delete some items.");
+    }
+  }
+
+  async function confirmBulkRename(): Promise<void> {
+    if (selectedPathsForBulk.size === 0 || bulkRenameBusy) return;
+
+    const selectedResults = visibleResults.filter((r) => selectedPathsForBulk.has(r.path));
+    if (selectedResults.length === 0) return;
+
+    if (bulkRenameMode === "replace" && !bulkRenameReplaceSearch) {
+      setActionError("Rename failed: search text cannot be empty.");
+      return;
+    }
+    if (bulkRenameMode === "enumerate" && !bulkRenameEnumerateBase.trim()) {
+      setActionError("Rename failed: base name cannot be empty.");
+      return;
+    }
+
+    setBulkRenameBusy(true);
+    setActionError(null);
+
+    setBulkActionProgress({
+      current: 0,
+      total: selectedResults.length,
+      label: "Renaming files..."
+    });
+
+    let renamedCount = 0;
+    let failCount = 0;
+    const errorMessages: string[] = [];
+
+    const formatNumber = (num: number, digits: number): string => {
+      let s = String(num);
+      while (s.length < digits) {
+        s = "0" + s;
+      }
+      return s;
+    };
+
+    for (let i = 0; i < selectedResults.length; i++) {
+      const result = selectedResults[i];
+      let newName = "";
+
+      const ext = result.extension ? `.${result.extension}` : "";
+      const baseName = result.extension && result.name.endsWith(ext)
+        ? result.name.slice(0, -ext.length)
+        : result.name;
+
+      if (bulkRenameMode === "replace") {
+        const searchEscaped = bulkRenameReplaceSearch.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+        const regex = new RegExp(searchEscaped, "gi");
+        newName = result.name.replace(regex, bulkRenameReplaceWith);
+      } else if (bulkRenameMode === "prefix_suffix") {
+        newName = `${bulkRenamePrefix}${baseName}${bulkRenameSuffix}${ext}`;
+      } else if (bulkRenameMode === "enumerate") {
+        const numStr = formatNumber(bulkRenameEnumerateStart + i, bulkRenameEnumerateDigits);
+        newName = `${bulkRenameEnumerateBase.trim()}${numStr}${ext}`;
+      }
+
+      newName = newName.trim();
+      if (!newName || newName === result.name) {
+        renamedCount++;
+        continue;
+      }
+
+      setBulkActionProgress({
+        current: i,
+        total: selectedResults.length,
+        label: `Renaming "${result.name}" to "${newName}"...`
+      });
+
+      try {
+        const nextPath = await invoke<string>("rename_path", {
+          path: result.path,
+          newName,
+          new_name: newName
+        });
+        renameSearchResultInState(result.path, nextPath, newName);
+        renamedCount++;
+      } catch (error) {
+        failCount++;
+        errorMessages.push(`Failed to rename "${result.name}": ${String(error)}`);
+      }
+    }
+
+    setBulkActionProgress(null);
+    setBulkRenameOpen(false);
+    setBulkRenameBusy(false);
+
+    setIsSelectionModeActive(false);
+    setSelectedPathsForBulk(new Set<string>());
+
+    if (renamedCount > 0) {
+      showActionNotice(`Renamed items.`);
+    }
+    if (failCount > 0) {
+      setActionError(errorMessages[0] || "Failed to rename some items.");
+    }
+  }
 
   useEffect(() => {
     setPreviewSourceState({});
@@ -5525,6 +5906,30 @@ function App() {
                 </span>
                 <button
                   type="button"
+                  className={`ghost-button ${activeTab === "sync" ? "is-active-tab-sync" : ""}`}
+                  style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
+                  onClick={() => {
+                    setActiveTab(activeTab === "sync" ? "search" : "sync");
+                  }}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="14"
+                    height="14"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    fill="none"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <rect x="2" y="3" width="13" height="9" rx="1.5" />
+                    <path d="M16 8h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-2" />
+                    <path d="M12 18h.01" />
+                  </svg>
+                  <span>Sync</span>
+                </button>
+                <button
+                  type="button"
                   className="ghost-button"
                   onClick={() => {
                     setWindowMode("full");
@@ -5763,6 +6168,29 @@ function App() {
                   <span aria-hidden="true">x</span>
                 </button>
               ) : null}
+              <button
+                type="button"
+                className="search-input-folder-btn"
+                aria-label="Open folder"
+                title="Open folder"
+                style={{ right: query.length > 0 ? "40px" : "12px" }}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                }}
+                onClick={async () => {
+                  try {
+                    const folderPath: string = await invoke("select_folder");
+                    if (folderPath) {
+                      setQuery(folderPath);
+                      searchInputRef.current?.focus();
+                    }
+                  } catch (_err) {
+                    // user cancelled or error – ignore
+                  }
+                }}
+              >
+                <FolderOpenIcon />
+              </button>
             </div>
 
             {!effectiveSearchMetricsHidden ? (
@@ -5900,6 +6328,7 @@ function App() {
                       </span>
                       <span>{formatBytes(visibleTotalBytes)}</span>
                     </div>
+
                     <label className="preview-toggle" htmlFor="preview-toggle">
                       <input
                         id="preview-toggle"
@@ -6031,14 +6460,15 @@ function App() {
                             ? textPreviewState[contentSnippetKey]?.text ?? ""
                             : ""
                           : "";
+                        const isBulkSelected = selectedPathsForBulk.has(result.path);
 
                         return (
                           <li
                             key={rowKey}
                             className={`result-row clickable ${isQuickMode ? "quick-result-row" : ""} ${(isQuickMode || quickLookOpen) && rowKey === selectedResultRowKey
-                                ? "is-selected"
-                                : ""
-                              } ${canDragResultFile ? "draggable-file" : ""}`}
+                              ? "is-selected"
+                              : ""
+                              } ${canDragResultFile ? "draggable-file" : ""} ${isBulkSelected ? "is-bulk-selected" : ""}`}
                             data-result-key={rowKey}
                             draggable={canDragResultFile}
                             onDragStart={(event) => {
@@ -6047,6 +6477,13 @@ function App() {
                             onContextMenu={(event) => {
                               openSearchResultContextMenu(event, result, rowKey);
                             }}
+                            onMouseDown={(event) => {
+                              if (event.button === 0) {
+                                startLongPress(result);
+                              }
+                            }}
+                            onMouseUp={cancelLongPress}
+                            onMouseLeave={cancelLongPress}
                             role="button"
                             tabIndex={0}
                             title={
@@ -6062,7 +6499,27 @@ function App() {
                                 return;
                               }
                               event.currentTarget.focus();
-                              setSelectedResultKey(rowKey);
+                              cancelLongPress();
+
+                              if (longPressTriggeredRef.current) {
+                                longPressTriggeredRef.current = false;
+                                return;
+                              }
+
+                              const isApp = result.resultKind === "app" || isAppSearchResult(result);
+                              if (!isApp && (isSelectionModeActive || event.ctrlKey || event.metaKey || event.shiftKey)) {
+                                if (!isSelectionModeActive) {
+                                  setIsSelectionModeActive(true);
+                                }
+                                if (event.shiftKey) {
+                                  handleRangeSelection(result);
+                                } else {
+                                  toggleBulkSelection(result);
+                                }
+                                setSelectedResultKey(rowKey);
+                              } else {
+                                setSelectedResultKey(rowKey);
+                              }
                             }}
                             onDoubleClick={() => {
                               if (hasSelectedText()) {
@@ -6088,6 +6545,11 @@ function App() {
                                 className={`result-preview ${previewKind} ${isDirectory ? "folder" : ""} kind-${iconKind}`}
                                 aria-hidden="true"
                               >
+                                {isSelectionModeActive && !isAppResult ? (
+                                  <div className={`bulk-checkbox-overlay ${isBulkSelected ? "is-selected" : ""}`}>
+                                    {isBulkSelected && <span className="bulk-checkmark-icon">✓</span>}
+                                  </div>
+                                ) : null}
                                 <ResultFallbackIcon result={result} className="preview-fallback-icon-shell" />
                                 {appIconSrc.length > 0 ? (
                                   <img
@@ -6145,6 +6607,11 @@ function App() {
                               </div>
                             ) : (
                               <div className={`result-icon ${isDirectory ? "folder" : ""} kind-${iconKind}`} aria-hidden="true">
+                                {isSelectionModeActive && !isAppResult ? (
+                                  <div className={`bulk-checkbox-overlay ${isBulkSelected ? "is-selected" : ""}`}>
+                                    {isBulkSelected && <span className="bulk-checkmark-icon">✓</span>}
+                                  </div>
+                                ) : null}
                                 {appIconSrc.length > 0 ? (
                                   <img className="result-icon-image" src={appIconSrc} alt="" loading="lazy" />
                                 ) : (
@@ -6424,6 +6891,59 @@ function App() {
                   <button type="button" className="load-more-button" onClick={loadMoreResults}>
                     {`Load more (+${defaultSearchLimit.toLocaleString()})`}
                   </button>
+                </div>
+              ) : null}
+
+              {isSelectionModeActive ? (
+                <div className="bulk-action-bar" role="toolbar" aria-label="Bulk actions">
+                  <div className="bulk-action-summary">
+                    <strong>{selectedPathsForBulk.size}</strong>
+                    <span>{selectedPathsForBulk.size === 1 ? "item selected" : "items selected"}</span>
+                  </div>
+                  <div className="bulk-action-buttons">
+                    <button
+                      type="button"
+                      className="bulk-action-btn primary"
+                      disabled={selectedPathsForBulk.size === 0}
+                      onClick={() => setBulkRenameOpen(true)}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      className="bulk-action-btn primary"
+                      disabled={selectedPathsForBulk.size === 0 || !(syncServerInfo?.running && syncServerInfo.connectedClients > 0)}
+                      onClick={handleBulkSendToPhone}
+                    >
+                      Send to phone
+                    </button>
+                    <button
+                      type="button"
+                      className="bulk-action-btn danger"
+                      disabled={selectedPathsForBulk.size === 0}
+                      onClick={() => setBulkDeleteOpen(true)}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      type="button"
+                      className="bulk-action-btn secondary"
+                      disabled={selectedPathsForBulk.size === 0}
+                      onClick={handleBulkCopyPaths}
+                    >
+                      Copy paths
+                    </button>
+                    <button
+                      type="button"
+                      className="bulk-action-btn ghost"
+                      onClick={() => {
+                        setIsSelectionModeActive(false);
+                        setSelectedPathsForBulk(new Set<string>());
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               ) : null}
             </section>
@@ -7690,57 +8210,57 @@ function App() {
                       </div>
                       <div className="sync-transfer-list">
                         {syncServerInfo.fileTransfers.map((transfer) => {
-                        const percent = transfer.size > 0
-                          ? Math.min(100, Math.round((transfer.bytesSent / transfer.size) * 100))
-                          : transfer.status === "completed" ? 100 : 0;
-                        return (
-                          <div className="sync-transfer-row" key={transfer.id}>
-                            <div className="sync-transfer-copy">
-                              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                                <strong>{transfer.name}</strong>
-                                {transfer.status === "completed" && transfer.path && (
-                                  <button
-                                    className="sync-transfer-folder-btn"
-                                    title="Open file location"
-                                    onClick={() => revealResult(transfer.path)}
-                                    style={{
-                                      background: "none",
-                                      border: "none",
-                                      cursor: "pointer",
-                                      padding: "2px",
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      opacity: 0.7,
-                                      transition: "opacity 0.15s",
-                                    }}
-                                    onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
-                                    onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.7")}
-                                  >
-                                    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                      <path d="M2 5.5C2 4.11929 3.11929 3 4.5 3H7.58579C8.11622 3 8.62493 3.21071 9 3.58579L10.4142 5H15.5C16.8807 5 18 6.11929 18 7.5V14.5C18 15.8807 16.8807 17 15.5 17H4.5C3.11929 17 2 15.8807 2 14.5V5.5Z" fill="var(--accent)" opacity="0.8"/>
-                                    </svg>
-                                  </button>
-                                )}
+                          const percent = transfer.size > 0
+                            ? Math.min(100, Math.round((transfer.bytesSent / transfer.size) * 100))
+                            : transfer.status === "completed" ? 100 : 0;
+                          return (
+                            <div className="sync-transfer-row" key={transfer.id}>
+                              <div className="sync-transfer-copy">
+                                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                  <strong>{transfer.name}</strong>
+                                  {transfer.status === "completed" && transfer.path && (
+                                    <button
+                                      className="sync-transfer-folder-btn"
+                                      title="Open file location"
+                                      onClick={() => revealResult(transfer.path)}
+                                      style={{
+                                        background: "none",
+                                        border: "none",
+                                        cursor: "pointer",
+                                        padding: "2px",
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        opacity: 0.7,
+                                        transition: "opacity 0.15s",
+                                      }}
+                                      onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+                                      onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.7")}
+                                    >
+                                      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                        <path d="M2 5.5C2 4.11929 3.11929 3 4.5 3H7.58579C8.11622 3 8.62493 3.21071 9 3.58579L10.4142 5H15.5C16.8807 5 18 6.11929 18 7.5V14.5C18 15.8807 16.8807 17 15.5 17H4.5C3.11929 17 2 15.8807 2 14.5V5.5Z" fill="var(--accent)" opacity="0.8" />
+                                      </svg>
+                                    </button>
+                                  )}
+                                </div>
+                                <span>
+                                  {transfer.status === "failed"
+                                    ? transfer.error || "Transfer failed"
+                                    : `${formatBytes(transfer.bytesSent)} / ${formatBytes(transfer.size)} - ${transfer.status}`}
+                                </span>
                               </div>
-                              <span>
-                                {transfer.status === "failed"
-                                  ? transfer.error || "Transfer failed"
-                                  : `${formatBytes(transfer.bytesSent)} / ${formatBytes(transfer.size)} - ${transfer.status}`}
-                              </span>
+                              <div className="sync-transfer-meter" aria-label={`${transfer.name} ${percent}%`}>
+                                <span style={{ width: `${percent}%` }} />
+                              </div>
                             </div>
-                            <div className="sync-transfer-meter" aria-label={`${transfer.name} ${percent}%`}>
-                              <span style={{ width: `${percent}%` }} />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-                ) : null}
+                          );
+                        })}
+                      </div>
+                    </section>
+                  ) : null}
 
 
-              </div>
-            )}
+                </div>
+              )}
             </div>
           </section>
         ) : null}
@@ -7785,6 +8305,22 @@ function App() {
             ) : null}
             {!activeSearchResultIsApp ? (
               <>
+                <button
+                  type="button"
+                  className="result-context-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    closeSearchResultContextMenu();
+                    setIsSelectionModeActive(true);
+                    setSelectedPathsForBulk((prev) => {
+                      const next = new Set(prev);
+                      next.add(activeSearchResultMenu.path);
+                      return next;
+                    });
+                  }}
+                >
+                  <span className="result-context-menu-item-label">Select file</span>
+                </button>
                 <button
                   type="button"
                   className="result-context-menu-item"
@@ -8098,10 +8634,10 @@ function App() {
                         <button
                           type="button"
                           className={`quick-look-copy-button ${quickLookCopyState === "copied"
-                              ? "is-copied"
-                              : quickLookCopyState === "error"
-                                ? "is-error"
-                                : ""
+                            ? "is-copied"
+                            : quickLookCopyState === "error"
+                              ? "is-error"
+                              : ""
                             }`}
                           aria-label={
                             quickLookCopyState === "copied"
@@ -8145,7 +8681,7 @@ function App() {
             }}
           >
             <div
-              className="modal-card"
+              className="modal-card rename-modal-card"
               onClick={(event) => {
                 event.stopPropagation();
               }}
@@ -8277,6 +8813,284 @@ function App() {
           </div>
         ) : null}
 
+        {bulkDeleteOpen ? (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => {
+              if (!bulkDeleteBusy) {
+                setBulkDeleteOpen(false);
+              }
+            }}
+          >
+            <div
+              className="modal-card"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+            >
+              <h3>Delete selected items?</h3>
+              <p style={{ margin: "8px 0 16px 0", fontSize: "0.9rem", color: "var(--text-muted)" }}>
+                {selectedPathsForBulk.size} {selectedPathsForBulk.size === 1 ? "item" : "items"} will be deleted.
+              </p>
+              <label className="modal-checkbox-option">
+                <input
+                  type="checkbox"
+                  checked={bulkDeleteRecycleBin}
+                  disabled={bulkDeleteBusy}
+                  onChange={(event) => {
+                    setBulkDeleteRecycleBin(event.currentTarget.checked);
+                  }}
+                />
+                <span>Move to Recycle Bin</span>
+              </label>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={bulkDeleteBusy}
+                  onClick={() => {
+                    setBulkDeleteOpen(false);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="row-action danger-row-action"
+                  disabled={bulkDeleteBusy}
+                  onClick={() => {
+                    void confirmBulkDelete();
+                  }}
+                >
+                  {bulkDeleteBusy
+                    ? bulkDeleteRecycleBin
+                      ? "Moving..."
+                      : "Deleting..."
+                    : bulkDeleteRecycleBin
+                      ? "Recycle"
+                      : "Delete"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {bulkRenameOpen ? (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => {
+              if (!bulkRenameBusy) {
+                setBulkRenameOpen(false);
+              }
+            }}
+          >
+            <div
+              className="modal-card rename-modal-card"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+              style={{ width: "min(500px, 95vw)" }}
+            >
+              <h3>Bulk Rename</h3>
+              <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: "16px" }}>
+                Renaming {selectedPathsForBulk.size} {selectedPathsForBulk.size === 1 ? "item" : "items"}.
+              </p>
+
+              <div className="bulk-rename-tabs" style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+                <button
+                  type="button"
+                  className={`tab-button ${bulkRenameMode === "replace" ? "active" : ""}`}
+                  style={{
+                    flex: 1,
+                    padding: "8px 12px",
+                    borderRadius: "6px",
+                    border: "1px solid var(--border-soft)",
+                    background: bulkRenameMode === "replace" ? "var(--accent)" : "none",
+                    color: bulkRenameMode === "replace" ? "var(--text-main)" : "var(--text-muted)",
+                    cursor: "pointer"
+                  }}
+                  onClick={() => setBulkRenameMode("replace")}
+                >
+                  Find & Replace
+                </button>
+                <button
+                  type="button"
+                  className={`tab-button ${bulkRenameMode === "prefix_suffix" ? "active" : ""}`}
+                  style={{
+                    flex: 1,
+                    padding: "8px 12px",
+                    borderRadius: "6px",
+                    border: "1px solid var(--border-soft)",
+                    background: bulkRenameMode === "prefix_suffix" ? "var(--accent)" : "none",
+                    color: bulkRenameMode === "prefix_suffix" ? "var(--text-main)" : "var(--text-muted)",
+                    cursor: "pointer"
+                  }}
+                  onClick={() => setBulkRenameMode("prefix_suffix")}
+                >
+                  Add Prefix/Suffix
+                </button>
+                <button
+                  type="button"
+                  className={`tab-button ${bulkRenameMode === "enumerate" ? "active" : ""}`}
+                  style={{
+                    flex: 1,
+                    padding: "8px 12px",
+                    borderRadius: "6px",
+                    border: "1px solid var(--border-soft)",
+                    background: bulkRenameMode === "enumerate" ? "var(--accent)" : "none",
+                    color: bulkRenameMode === "enumerate" ? "var(--text-main)" : "var(--text-muted)",
+                    cursor: "pointer"
+                  }}
+                  onClick={() => setBulkRenameMode("enumerate")}
+                >
+                  Enumerate
+                </button>
+              </div>
+
+              {bulkRenameMode === "replace" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "20px" }}>
+                  <label className="modal-input-group">
+                    <span>Find text</span>
+                    <input
+                      type="text"
+                      value={bulkRenameReplaceSearch}
+                      disabled={bulkRenameBusy}
+                      onChange={(e) => setBulkRenameReplaceSearch(e.target.value)}
+                      placeholder="e.g. old-name"
+                    />
+                  </label>
+                  <label className="modal-input-group">
+                    <span>Replace with</span>
+                    <input
+                      type="text"
+                      value={bulkRenameReplaceWith}
+                      disabled={bulkRenameBusy}
+                      onChange={(e) => setBulkRenameReplaceWith(e.target.value)}
+                      placeholder="e.g. new-name"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {bulkRenameMode === "prefix_suffix" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "20px" }}>
+                  <label className="modal-input-group">
+                    <span>Prefix</span>
+                    <input
+                      type="text"
+                      value={bulkRenamePrefix}
+                      disabled={bulkRenameBusy}
+                      onChange={(e) => setBulkRenamePrefix(e.target.value)}
+                      placeholder="Prefix to prepend"
+                    />
+                  </label>
+                  <label className="modal-input-group">
+                    <span>Suffix</span>
+                    <input
+                      type="text"
+                      value={bulkRenameSuffix}
+                      disabled={bulkRenameBusy}
+                      onChange={(e) => setBulkRenameSuffix(e.target.value)}
+                      placeholder="Suffix to append"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {bulkRenameMode === "enumerate" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "20px" }}>
+                  <label className="modal-input-group">
+                    <span>Base Name</span>
+                    <input
+                      type="text"
+                      value={bulkRenameEnumerateBase}
+                      disabled={bulkRenameBusy}
+                      onChange={(e) => setBulkRenameEnumerateBase(e.target.value)}
+                      placeholder="Base filename"
+                    />
+                  </label>
+                  <div style={{ display: "flex", gap: "12px" }}>
+                    <label className="modal-input-group" style={{ flex: 1 }}>
+                      <span>Start Number</span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={bulkRenameEnumerateStart}
+                        disabled={bulkRenameBusy}
+                        onChange={(e) => setBulkRenameEnumerateStart(parseInt(e.target.value) || 1)}
+                      />
+                    </label>
+                    <label className="modal-input-group" style={{ flex: 1 }}>
+                      <span>Digits</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="10"
+                        value={bulkRenameEnumerateDigits}
+                        disabled={bulkRenameBusy}
+                        onChange={(e) => setBulkRenameEnumerateDigits(parseInt(e.target.value) || 3)}
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={bulkRenameBusy}
+                  onClick={() => {
+                    setBulkRenameOpen(false);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={bulkRenameBusy}
+                  onClick={() => {
+                    void confirmBulkRename();
+                  }}
+                >
+                  {bulkRenameBusy ? "Renaming..." : "Rename"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {bulkActionProgress ? (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            style={{ zIndex: 10000 }}
+          >
+            <div className="modal-card" style={{ textAlign: "center", padding: "30px 40px" }}>
+              <h3>{bulkActionProgress.label}</h3>
+              <div style={{ margin: "20px 0", background: "var(--border-soft)", borderRadius: "10px", height: "8px", overflow: "hidden" }}>
+                <div
+                  style={{
+                    background: "var(--accent)",
+                    height: "100%",
+                    width: `${(bulkActionProgress.current / bulkActionProgress.total) * 100}%`,
+                    transition: "width 0.2s ease"
+                  }}
+                />
+              </div>
+              <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>
+                {bulkActionProgress.current} / {bulkActionProgress.total} completed
+              </p>
+            </div>
+          </div>
+        ) : null}
+
         {syncServerInfo?.running && syncServerInfo.pendingApprovals.length > 0 ? (
           <div
             className="modal-overlay"
@@ -8308,7 +9122,7 @@ function App() {
               <p style={{ margin: "0 0 16px 0", fontSize: "0.84rem", color: "var(--text-muted)" }}>
                 A mobile companion device is attempting to connect to your PC.
               </p>
-              
+
               <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                 {syncServerInfo.pendingApprovals.map((req) => (
                   <div

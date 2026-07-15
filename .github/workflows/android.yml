@@ -15,6 +15,8 @@ jobs:
   build-preview-apk:
     name: Build preview APK
     runs-on: ubuntu-latest
+    env:
+      HAS_ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
 
     steps:
       - name: Checkout repository
@@ -34,8 +36,32 @@ jobs:
         working-directory: android
         run: chmod +x ./gradlew
 
+      - name: Validate Android signing secrets
+        if: env.HAS_ANDROID_SIGNING_KEY == 'true'
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+
+      - name: Decode Android signing key
+        if: env.HAS_ANDROID_SIGNING_KEY == 'true'
+        shell: bash
+        run: |
+          mkdir -p android/app/signing
+          printf '%s' "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/signing/omnisearch-upload.jks
+
       - name: Build preview APK
         working-directory: android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/app/signing/omnisearch-upload.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: ./gradlew assemblePreview --stacktrace
 
       - name: Upload preview APK

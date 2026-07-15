@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="24dp" />
+            <solid android:color="#1E1E1E" />
+            <size android:width="250dp" android:height="48dp" />
+        </shape>
+    </item>
+    <item
+        android:drawable="@mipmap/ic_launcher"
+        android:gravity="left|center_vertical"
+        android:width="24dp"
+        android:height="24dp"
+        android:left="16dp" />
+    <item
+        android:drawable="@drawable/ic_widget_computer"
+        android:gravity="right|center_vertical"
+        android:width="24dp"
+        android:height="24dp"
+        android:right="16dp" />
+</layer-list>

@@ -486,6 +486,71 @@ fn delete_path(
 }
 
 #[tauri::command]
+async fn select_folder() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            unsafe {
+                use windows::Win32::System::Com::{
+                    CoCreateInstance, CoInitializeEx, CoUninitialize,
+                    COINIT_APARTMENTTHREADED, CLSCTX_ALL,
+                };
+                use windows::Win32::UI::Shell::{
+                    FileOpenDialog, IFileOpenDialog, FOS_PICKFOLDERS,
+                    SIGDN_FILESYSPATH,
+                };
+
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+                let result: Result<String, String> = (|| {
+                    let dialog: IFileOpenDialog = CoCreateInstance(
+                        &FileOpenDialog, None, CLSCTX_ALL,
+                    )
+                    .map_err(|e| format!("Dialog create failed: {e}"))?;
+
+                    let opts = dialog
+                        .GetOptions()
+                        .map_err(|e| format!("GetOptions: {e}"))?;
+                    dialog
+                        .SetOptions(opts | FOS_PICKFOLDERS)
+                        .map_err(|e| format!("SetOptions: {e}"))?;
+
+                    dialog
+                        .Show(None)
+                        .map_err(|_| "No folder selected".to_string())?;
+
+                    let item = dialog
+                        .GetResult()
+                        .map_err(|e| format!("GetResult: {e}"))?;
+
+                    let name = item
+                        .GetDisplayName(SIGDN_FILESYSPATH)
+                        .map_err(|e| format!("GetDisplayName: {e}"))?;
+
+                    let path = name.to_string()
+                        .map_err(|e| format!("to_string: {e}"))?;
+
+                    Ok(path)
+                })();
+
+                CoUninitialize();
+                let _ = tx.send(result);
+            }
+        });
+
+        rx.recv()
+            .map_err(|_| "Thread communication failed".to_string())?
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Folder selection is only supported on Windows.".to_string())
+    }
+}
+
+#[tauri::command]
 fn rename_path(path: String, new_name: String) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
@@ -1210,7 +1275,7 @@ fn send_file_to_mobile(
     sync_state: tauri::State<'_, Arc<sync_server::SyncState>>,
     path: String,
 ) -> Result<sync_server::MobileTransferSnapshot, String> {
-    sync_server::queue_file_transfer(Arc::clone(&sync_state), &path)
+    sync_server::queue_file_transfer(&sync_state, &path)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1265,7 +1330,7 @@ fn handle_shell_send_to_phone(app: &tauri::AppHandle, args: &[String]) {
     let mut messages = Vec::new();
 
     for path in paths {
-        match sync_server::queue_file_transfer(Arc::clone(&sync_state), &path) {
+        match sync_server::queue_file_transfer(&sync_state, &path) {
             Ok(snapshot) => {
                 queued += 1;
                 messages.push(format!("Queued {} for phone.", snapshot.name));
@@ -1392,6 +1457,7 @@ pub fn run() {
             duplicate_scan_status,
             cancel_duplicate_scan,
             delete_path,
+            select_folder,
             rename_path,
             list_drives,
             open_file,

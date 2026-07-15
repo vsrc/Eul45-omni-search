@@ -34,6 +34,7 @@ object LocalMusicPlayerManager {
         get() = loopMode != LocalMusicLoopMode.OFF
 
     var currentPlaybackPosition by mutableIntStateOf(0)
+        private set
     
     var duration by mutableIntStateOf(0)
         private set
@@ -96,6 +97,7 @@ object LocalMusicPlayerManager {
                 start()
             }
             mediaPlayer = player
+            
             duration = player.duration
             currentPlaybackPosition = 0
             isPlaying = true

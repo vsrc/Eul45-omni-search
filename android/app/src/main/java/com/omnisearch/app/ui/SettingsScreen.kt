@@ -37,7 +37,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -61,7 +60,9 @@ sealed interface PinDialogMode {
 fun SettingsScreen(
     syncViewModel: SyncViewModel,
     securityViewModel: SecurityViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    openScannerRequest: Boolean = false,
+    onOpenScannerHandled: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -82,6 +83,8 @@ fun SettingsScreen(
     var pinDialogMode by remember { mutableStateOf<PinDialogMode?>(null) }
     var pinBuffer by remember { mutableStateOf("") }
 
+    var showWidgetsScreen by remember { mutableStateOf(false) }
+
     // Verify biometric hardware support
     val supportsBiometric = remember {
         val manager = androidx.biometric.BiometricManager.from(context)
@@ -100,10 +103,28 @@ fun SettingsScreen(
         }
     }
 
+    LaunchedEffect(openScannerRequest) {
+        if (openScannerRequest) {
+            showWidgetsScreen = false
+            val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (hasCam) {
+                isScanningQR = true
+            } else {
+                cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+            }
+            onOpenScannerHandled()
+        }
+    }
+
     LaunchedEffect(pairingLink) {
         if (pairingLink.isNotEmpty()) {
             manualAddressInput = pairingLink
         }
+    }
+
+    if (showWidgetsScreen) {
+        com.omnisearch.app.ui.WidgetsScreen(onBack = { showWidgetsScreen = false })
+        return
     }
 
     Column(
@@ -376,7 +397,45 @@ fun SettingsScreen(
             }
         }
 
-        // CARD 3: About developers credentials
+        // CARD 3: Customization
+        androidx.compose.material3.Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = FluentTheme.colors.surfaceBg),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(FluentTheme.dims.surfaceRadius),
+            border = androidx.compose.foundation.BorderStroke(1.dp, FluentTheme.colors.panelBorder)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "CUSTOMIZATION",
+                    fontSize = 11.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    color = FluentTheme.colors.textMuted,
+                    letterSpacing = 0.5.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showWidgetsScreen = true }
+                        .padding(vertical = 14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Home Screen Widgets", fontSize = 16.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, color = FluentTheme.colors.textColor)
+                        Text("Add or customize OmniSearch widgets", fontSize = 12.sp, color = FluentTheme.colors.textMuted)
+                    }
+                    Icon(
+                        imageVector = Icons.Default.Apps,
+                        contentDescription = "Widgets",
+                        tint = FluentTheme.colors.textMuted
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // CARD 4: About developers credentials
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = FluentTheme.colors.surfaceBg),
@@ -425,13 +484,13 @@ fun SettingsScreen(
 
                 // Social Icon links row
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    SocialButton(label = "GitHub", icon = Icons.Default.Code, url = "https://github.com/Eul45", context = context, modifier = Modifier.weight(1f))
-                    SocialButton(label = "LinkedIn", icon = Icons.Default.AccountCircle, url = "https://www.linkedin.com/in/eyuel-engida-77155a317", context = context, modifier = Modifier.weight(1f))
-                    SocialButton(label = "Telegram", icon = Icons.Default.Send, url = "https://t.me/Eul_zzz", context = context, modifier = Modifier.weight(1f))
+                    SocialButton(label = "GitHub", icon = Icons.Default.Code, url = "https://github.com/Eul45", context = context)
+                    SocialButton(label = "LinkedIn", icon = Icons.Default.AccountCircle, url = "https://www.linkedin.com/in/eyuel-engida-77155a317", context = context)
+                    SocialButton(label = "Telegram", icon = Icons.Default.Send, url = "https://t.me/Eul_zzz", context = context)
                 }
 
                 Spacer(modifier = Modifier.height(20.dp))
@@ -658,11 +717,10 @@ fun SocialButton(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     url: String,
-    context: Context,
-    modifier: Modifier = Modifier
+    context: Context
 ) {
     Row(
-        modifier = modifier
+        modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
             .background(FluentTheme.colors.surfaceBg)
             .border(1.dp, FluentTheme.colors.panelBorder, RoundedCornerShape(6.dp))
@@ -672,19 +730,12 @@ fun SocialButton(
                     context.startActivity(intent)
                 } catch (_: Exception) {}
             }
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = label, tint = FluentTheme.colors.accent, modifier = Modifier.size(16.dp))
         Spacer(modifier = Modifier.width(4.dp))
-        Text(
-            label,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            color = FluentTheme.colors.textColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
+        Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = FluentTheme.colors.textColor)
     }
 }
 

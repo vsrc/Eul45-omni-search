@@ -45,7 +45,7 @@ enum class ConnectionStatus {
 
 class SyncViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
-        const val OFFLINE_PREVIEW_CACHE_LIMIT_BYTES = 50L * 1024L * 1024L
+        const val OFFLINE_PREVIEW_CACHE_LIMIT_BYTES = 1024L * 1024L
     }
 
     private val context = application.applicationContext
@@ -157,6 +157,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
     private var webSocket: WebSocket? = null
     private var pairingJob: Job? = null
     private var transferPollJob: Job? = null
+    @Volatile
     private var activeIncomingTransfer: IncomingTransfer? = null
     private var connectionGeneration = 0
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -508,7 +509,10 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
                                     totalChunks = transferObj.optInt("totalChunks", 1).coerceAtLeast(1),
                                     outputUri = outputUri,
                                     outputStream = outputStream,
-                                    previewBuffer = if (transferObj.optLong("size", 0L) <= OFFLINE_PREVIEW_CACHE_LIMIT_BYTES) {
+                                    previewBuffer = if (
+                                        transferObj.optLong("size", 0L) <= OFFLINE_PREVIEW_CACHE_LIMIT_BYTES &&
+                                        (isImageTransfer(name, contentType) || isDocumentTransfer(name, contentType))
+                                    ) {
                                         ByteArrayOutputStream()
                                     } else {
                                         null
@@ -967,12 +971,6 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     _actionMessage.value = "Downloaded ${transfer.name}"
                 }
-                delay(1200)
-                if (_status.value == ConnectionStatus.CONNECTED) {
-                    sendMsg(JSONObject().apply {
-                        put("type", "request_desktop_transfer")
-                    })
-                }
             } catch (e: Exception) {
                 Log.e("SyncViewModel", "Error saving incoming transfer", e)
                 try {
@@ -1010,6 +1008,17 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
         sendMsg(JSONObject().apply {
             put("type", "request_file_content")
             put("payload", JSONObject().apply {
+                put("path", path)
+            })
+        })
+    }
+
+    fun triggerRemoteTransfer(path: String) {
+        if (_status.value != ConnectionStatus.CONNECTED) return
+        sendMsg(JSONObject().apply {
+            put("type", "remote_action")
+            put("payload", JSONObject().apply {
+                put("action", "transfer_to_phone")
                 put("path", path)
             })
         })
@@ -1282,7 +1291,7 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     val themeMode: StateFlow<String> = prefs.themeModeFlow
-        .stateIn(viewModelScope, SharingStarted.Eagerly, "SYSTEM")
+        .stateIn(viewModelScope, SharingStarted.Eagerly, context.getSharedPreferences("omnisearch_widget_theme", Context.MODE_PRIVATE).getString("theme_mode", "SYSTEM") ?: "SYSTEM")
 
     val themeColor: StateFlow<String> = prefs.themeColorFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, "SLATE")
@@ -1290,6 +1299,47 @@ class SyncViewModel(application: Application) : AndroidViewModel(application) {
     fun setThemeMode(mode: String) {
         viewModelScope.launch {
             prefs.saveThemeMode(mode)
+            com.omnisearch.app.widget.WidgetThemeUtil.saveThemeMode(context, mode)
+            updateAllWidgets()
+        }
+    }
+
+    private fun updateAllWidgets() {
+        val appWidgetManager = android.appwidget.AppWidgetManager.getInstance(context)
+        
+        val explorerIds = appWidgetManager.getAppWidgetIds(
+            android.content.ComponentName(context, com.omnisearch.app.widget.LocalExplorerWidgetProvider::class.java)
+        )
+        if (explorerIds.isNotEmpty()) {
+            com.omnisearch.app.widget.LocalExplorerWidgetProvider().onUpdate(context, appWidgetManager, explorerIds)
+        }
+        
+        val scanIds = appWidgetManager.getAppWidgetIds(
+            android.content.ComponentName(context, com.omnisearch.app.widget.ScanConnectWidgetProvider::class.java)
+        )
+        for (id in scanIds) {
+            com.omnisearch.app.widget.ScanConnectWidgetProvider.updateAppWidget(context, appWidgetManager, id)
+        }
+        
+        val musicIds = appWidgetManager.getAppWidgetIds(
+            android.content.ComponentName(context, com.omnisearch.app.widget.MusicWidgetProvider::class.java)
+        )
+        for (id in musicIds) {
+            com.omnisearch.app.widget.MusicWidgetProvider.updateAppWidget(context, appWidgetManager, id)
+        }
+        
+        val musicSmallIds = appWidgetManager.getAppWidgetIds(
+            android.content.ComponentName(context, com.omnisearch.app.widget.MusicWidgetSmallProvider::class.java)
+        )
+        for (id in musicSmallIds) {
+            com.omnisearch.app.widget.MusicWidgetSmallProvider.updateAppWidgetSmall(context, appWidgetManager, id)
+        }
+
+        val searchIds = appWidgetManager.getAppWidgetIds(
+            android.content.ComponentName(context, com.omnisearch.app.widget.SearchWidgetProvider::class.java)
+        )
+        for (id in searchIds) {
+            com.omnisearch.app.widget.SearchWidgetProvider.updateAppWidget(context, appWidgetManager, id)
         }
     }
 
